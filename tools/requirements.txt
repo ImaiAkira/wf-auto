@@ -1,0 +1,4 @@
+json-with-comments
+
+# Agent runtime deps are bundled into install/python (not installed for these
+# build scripts); pinned separately in tools/requirements-agent.txt.

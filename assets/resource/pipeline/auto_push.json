@@ -1,0 +1,317 @@
+{
+    // 自动推主线（MaaFramework pipeline 版）
+    // 结构：AutoPush 是状态分派器，依次尝试各状态节点；命中即执行点击并回到 AutoPush。
+    // 最后 PushWait 恒命中（DirectHit），保证任务持续循环等待画面变化。
+    // 注意：正式使用请用 MaaPiCli / MFAAvalonia 运行任务入口 AutoPush。
+    "AutoPush": {
+        // 分派顺序 = 优先级。最后两个 AdvanceTap 是「无文字界面」兜底，
+        // 必须放在所有真实识别节点之后，否则会抢掉正常点击。
+        "next": [
+            // ★公共换日弹窗（common.json）放最前★：最临时的全局打断，
+            //   用 [JumpBack] 前缀调用；它处理完弹窗消失，不会持续命中。
+            "[JumpBack]PubDailyPopup",
+            // 公共账号页/标题页推进（common.json）：原地替换原 PushLoginContinue/PushTitleStart。
+            // ★等价性★：二者原 next=["AutoPush"]（调用者即 AutoPush）→ [JumpBack] 等价。
+            // 判据由未锚定的「继续游戏/点击开始」精确化为 ^...$（见 common.json 说明）。
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            // 公共加载等待（common.json）：纯等待不点击；沿用原 PushLoadingWait 的位置
+            // （在账号/标题重进链之后、业务节点之前）。
+            "[JumpBack]PubLoadingWait",
+            // 公共结算推进（common.json）：原地替换原 PushResultContinue/PushResultFallback
+            // （二者 next 均为 ["AutoPush"]，调用者就是 AutoPush → [JumpBack] 完全等价）。
+            // 顺序保持：先点底部「继续/OK」，再点顶部 QUESTRESULT 横幅快进。
+            "[JumpBack]PubResultContinue",
+            "[JumpBack]PubQuestResult",
+            // 公共升级结算（common.json）：原地替换原 PushLevelUpContinue。
+            // ★等价性★：原 next=["AutoPush"]（调用者即 AutoPush）→ [JumpBack] 等价。
+            "[JumpBack]PubLevelUpContinue",
+            "PushItemContinue",
+            // 公共新角色画面（common.json）：原地替换原 PushNewCharTap。
+            // ★等价性★：原 next=["AutoPush"]（调用者即 AutoPush）→ [JumpBack] 等价。
+            "[JumpBack]PubNewCharTap",
+            "PushRewardClose",
+            "PushSkipConfirm",
+            "PushSkipStory",
+            // ★「体力不足 → 星岛石恢复」★（scene/stamina.py 是真源）：主线关卡「挑战」消耗体力，
+            //   不足时游戏弹回复体力弹窗 —— 共享节点「先点星导石行、再点确认框 OK」（只用星岛石）。
+            // ★#102 P0-1★ 第一步的**模板优先**通道（真源 scene/stamina.py::RECOVERY_STEPS）：
+            //   与下面那条 OCR 版是同一动作（点星导石行框中心），只差行判据（图标模板 vs 行名 OCR）；
+            //   必须排在 OCR 版**之前**（next 是有序候选，先命中先执行）。
+            "[JumpBack]PubStaminaUseStoneTpl",
+            "[JumpBack]PubStaminaUseStone",
+            "[JumpBack]PubStaminaConfirmOk",
+            "[JumpBack]PubStaminaDoneOk",
+            // 公共「挑战」（common.json）：原地替换原 PushChallenge。
+            // ★等价性★：原 next=["AutoPush"]（调用者即 AutoPush）→ [JumpBack] 等价。
+            "[JumpBack]PubChallenge",
+            "PushBattleWait",
+            "PushHomeEntry",
+            "PushChapterEnter",
+            "PushStageLocate",
+            "PushStageListLabel",
+            "PushStageNext",
+            "PushStageAllDone",
+            "PushStageFightRow1",
+            "PushStageFightRow2",
+            "PushStageFightRow3",
+            "PushStageFixed",
+            // ★卡死自恢复（需求：给「自动过主线」补上自愈）★
+            // stall_recover：画面连续「无响应重开阈值」秒无变化 → 判定卡死 → restart_game。
+            // 放在【所有真实识别业务节点之后、恒命中的兜底点击之前】：
+            //   · 不抢前面任何业务节点的闸（只有它们全不命中才轮到本节点）；
+            //   · 必须排在 PushAdvanceTap/PushAdvanceTapCenter 这两个 DirectHit 之前，
+            //     否则它们恒命中 → 本节点永远轮不到（卡死时点屏幕也推不动 → 永远卡住）。
+            // 阈值经 interface「无响应重开阈值」选项覆盖（默认 180，与 recover/side/special 一致）。
+            "PushStallRecover",
+            "PushAdvanceTap",
+            "PushAdvanceTapCenter",
+            "PushWait"
+        ]
+    },
+    "PushItemContinue": {
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["获得道具"] }
+        },
+        "action": { "type": "Click", "param": { "target": [358, 1198] } },
+        "post_delay": 1200,
+        "next": ["AutoPush"]
+    },
+    "PushRewardClose": {
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^关闭$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1200,
+        "next": ["AutoPush"]
+    },
+    "PushSkipConfirm": {
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^跳过$"], "roi": [0, 600, 720, 600] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["AutoPush"]
+    },
+    "PushSkipStory": {
+        // 剧情页右上角「跳过>」。★判据已收敛到 common.PubSkipStoryText（薄包装）★
+        // 为什么不用 [JumpBack]PubSkipStory：本节点同时被 farm.json 以普通名字引用，
+        // 原 next=["AutoPush"]（farm 用到时会转入 AutoPush 分派），[JumpBack] 会改该流转
+        // → 不等价，保留薄包装。动作/next/延时原样。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubSkipStoryText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 1500,
+        "next": ["AutoPush"]
+    },
+    "PushBattleWait": {
+        // 战斗中：判据收敛到 common.json 的 PubBattleTime/PubBattleScore
+        // （And：时间 \d+:\d+ + 分数 \d）。
+        // ★绝不改回裸「时间」「分数」：结算页「战斗分数」「最长滞空时间6秒」会误命中 → 空等死循环★
+        // post_delay 与分派位置沿用本文件实测值（5000）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubBattleTime", "PubBattleScore"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 5000,
+        "next": ["AutoPush"]
+    },
+    "PushHomeEntry": {
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^关卡$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushChapterEnter": {
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["通关率"] }
+        },
+        "action": { "type": "Click", "param": { "target": [62, 647] } },
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushStageLocate": {
+        // 关卡列表：先识别「当前进度」标签（其识别位置会被记录）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["当前进度"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["PushStageNodeClick"]
+    },
+    "PushStageNodeClick": {
+        // 点击「当前进度」标签右上方——实测关卡节点相对标签的偏移约为 (+50, -26)
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Click",
+            "param": { "target": "PushStageLocate", "target_offset": [50, -26, 0, 0] }
+        },
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushStageListLabel": {
+        // 关卡列表页（无「当前进度」标签时）：识别「第N关」标签并记录位置
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["第.关"], "roi": [0, 300, 720, 900] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["PushStageListNodeClick"]
+    },
+    "PushStageListNodeClick": {
+        // 点击「第N关」标签上方约 45px（该关卡节点所在位置）
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Click",
+            "param": { "target": "PushStageListLabel", "target_offset": [0, -45, 0, 0] }
+        },
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushStageNext": {
+        // 【核心】关卡列表：由 agent 的 stage_next 挑出「第一个还没打过的关卡」，
+        // 并直接返回那一行「战斗」按钮的坐标。
+        // 每挑中一关就记入「已打过」，下一轮自动跳过 ——
+        // 这就解决了「反复进出同一个最上面的关卡」的死循环。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stage_next",
+                "custom_recognition_param": { "row_dy": 150 }
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": ["AutoPush"]
+    },
+    "PushStageAllDone": {
+        // 可见关卡全部打过：向列表上方滚动，找新的关卡。
+        // 若 agent 不可用，本节点与 PushStageNext 都会识别失败，自动降级到下面的
+        // PushStageFightRow1/2/3（按 y 分带点「战斗」）和 PushStageFixed。
+        "recognition": {
+            "type": "Custom",
+            "param": { "custom_recognition": "stage_all_done" }
+        },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 900], "end": [360, 620], "duration": 450 }
+        },
+        "max_hit": 200,
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushStageFightRow1": {
+        // 关卡列表/详情：点【行内真正的「战斗」按钮】，而不是点死坐标。
+        // 实测死坐标 (351,463) 会落在关卡名文字上，进不去战斗，导致反复进出同一关。
+        // roi 按 y 分带：先第 1 行（最上面），找不到「战斗」再往下找。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^战斗$"], "roi": [0, 380, 720, 230] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": ["AutoPush"]
+    },
+    "PushStageFightRow2": {
+        // 第 2 行区域（顶行是剧情节点、没有「战斗」时会轮到它）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^战斗$"], "roi": [0, 610, 720, 230] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": ["AutoPush"]
+    },
+    "PushStageFightRow3": {
+        // 第 3 行及以下区域
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^战斗$"], "roi": [0, 840, 720, 400] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": ["AutoPush"]
+    },
+    "PushStageFixed": {
+        // 主线关卡横幅页：点死坐标 (351,463) 进入。
+        //
+        // 【重要】expect 只保留【主线独有】的字：
+        //   * 不要 "STORY" / "COMPLETE" / "OMPLETE" —— 外传列表页也有，会误命中后空点（实测连点 64 次）
+        //   * 不要 "推荐编成" —— 外传的【关卡详情页】也有这个字，同样会误命中空点（实测死循环）
+        //   只有 "第.章"（如「第6章大和之都 9-1」）和 "世界" 是主线关卡横幅独有的。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["第.章", "世界"] }
+        },
+        "action": { "type": "Click", "param": { "target": [351, 463] } },
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushStallRecover": {
+        // 【卡死自恢复】画面连续 N 秒无变化 → 判定卡死 → 重开游戏拉回主城（主线会重新导航）。
+        // 阈值复用 interface「无响应重开阈值」（默认 180s），与 RecoverStallRestart /
+        //   SideStallRecover / SpecialStallRecover 同一套，不新造。
+        // 恢复动作 = restart_game（已改为设备无关，走 MAA controller）。
+        // ★误报风险★：识别/等待节点本身不动画面；只有当加载页/剧情页/战斗页真的静止超阈值
+        //   （游戏 hang）才会命中并重开，属预期兜底。正常流程画面在动，不会误触发。
+        // 位置见上面 AutoPush.next 的说明（必须在恒命中兜底点击之前）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stall_recover",
+                "custom_recognition_param": { "threshold_sec": 180 }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": ["AutoPush"]
+    },
+    "PushAdvanceTap": {
+        // 兜底推进①：所有已知状态都没匹配上时，点屏幕下方通用「继续」位置。
+        // 用于「获得角色」这类弹窗（有可点的继续/确认按钮）。
+        // max_hit 限次：连续多次都推不动时，交给下面的「点屏幕正中」阶段。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "Click", "param": { "target": [358, 1198] } },
+        "max_hit": 6,
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushAdvanceTapCenter": {
+        // 兜底推进②：点屏幕正中。
+        // 专治「人物蹦出来」这类【全屏立绘 + 无任何可识别文字 + 点任意处继续】的画面：
+        // 这类界面 OCR 什么都读不到，只能靠不依赖文字的点击推进，否则会永久卡死。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "Click", "param": { "target": [360, 540] } },
+        "post_delay": 2000,
+        "next": ["AutoPush"]
+    },
+    "PushWait": {
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": ["AutoPush"]
+    }
+}

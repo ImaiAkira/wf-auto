@@ -1,0 +1,237 @@
+{
+    // ==========================================================================
+    // ★#103 B 方案：五重**场景接口层**（MaaEnd 式 SceneManager）★ —— 票 #103 新增文件
+    //
+    // 【为什么单独一个文件】接口层是「导航 + 通用异常」的**公共一层**：业务文件
+    //   ``wuchong.json`` 只留业务，导航/异常的复杂度收进这里并被命名（研究 §3.2 末：
+    //   「异常/导航的复杂度并没有消失，它被搬进了你不写业务时不用看的一层」）。
+    // 【真源】本文件是 ``scene/wuchong.py`` ⑦ 段的**投影**（ADR-0001：配置为真源）：
+    //   ``SCENE_ENTER`` / ``SCENE_GUARD_CHAIN`` / ``SCENE_GUARD_DONE`` / ``IN_STATES`` /
+    //   ``IN_SCENE_ORDER`` / ``IN_NEXT``（验证器的唯一合法后继）/ ``SCENE_ENTER_NEXT`` /
+    //   ``GUARD_CHAIN_NEXT`` / ``STEP_TAIL``（业务 next 的末位兜底）/ ``IDEMPOTENT_UNSAFE``。
+    //   漂移由 ``tools/contract_hooks/hooks_103.py`` 把守（识别参数、顺序、成员集、IN_NEXT
+    //   的**绝对**口径 —— 只断言「投影 == IN_NEXT」是相对的，真源改成 () 会整体变绿）。
+    //
+    // 【机制】（MaaFramework 3.1：``next`` 是**有序候选**、``[JumpBack]`` 是**任务级单栈**、
+    //   且「当前节点的 next 列表为空（若存在 [JumpBack] 会先回跳）→ 任务流程终止」；
+    //   见 docs/research/pipeline-exception-patterns.md §2.1/§2.2）
+    //
+    //     ★R1b 修正后的形状★ 业务节点（21 个）next = **真后继** + **末位**万能跳转：
+    //         [ "WuchongNavRow",                // ① 本步真正的后继（FLOW_STEPS[i].next，★进度靠它★）
+    //           "[JumpBack]SceneEnterWuchong" ] // ② 万能跳转（DirectHit）★必须末位★
+    //
+    //     ★为什么不是第一版的「[验证器, 跳转] 2 项」★：验证器在当前页恒真（WuchongInLordList
+    //       在列表页永远命中）⇒ 业务 next[0] 直接命中 ⇒ 动作**永不发生** ⇒ 交回枢纽 ⇒ 枢纽按
+    //       声明序又派回同一个节点 ⇒ 死循环（真机 2026-10-18 05:0x / 384：2.5 分钟 11 次采样
+    //       全是 wuchong_lord_list、零点击、零战斗）。进度必须由**真后继**提供 —— 改造前的
+    //       线性 next 正是这么活的（本文件是那份真源投影的一部分：scene/wuchong.py ⑦/⑦b）。
+    //
+    //     真后继全不命中时才走到本文件（末位兜底）→ SceneEnterWuchong 按三层兜：
+    //          7 个验证器（确认我现在在哪一页 → 交回枢纽，零额外点击）
+    //        → [JumpBack]PubReturnHome（掉线/被踢回 → 回主城重来）
+    //        → WuchongGuardChain（今天那 20 项异常阶梯，**顺序一字不改**）
+    //        → WuchongGuardDone（next=[] → 弹栈，绝不让中继悬着）
+    //
+    // 【四条硬约束（守卫钉死，破坏实验见 hooks_103）】
+    //   1. 每个 ``WuchongIn*`` 的 next **必须 == scene/wuchong.IN_NEXT（= ["WuchongEntry"]）**：
+    //      ★空 next 不是「纯闸门」★ —— MaaFramework 的语义是「next 为空且无 [JumpBack] ⇒
+    //      **任务流程终止**」，真机一跑就会在第一步「任务完成」（这是 #103-R1 判定的**致命形态**，
+    //      MaaEnd 文档 :33 那句已按本仓机制修正；守卫 hooks_103 用**绝对**断言钉住）；
+    //   2. ``SceneEnter*`` 只能出现在业务节点 next 的**最后一项**（它是 DirectHit，放前面 =
+    //      后续候选永不评估 = 在接口层里打转）；
+    //   3. ``WuchongGuardChain`` 内部**不得回指** ``SceneEnter*``（DirectHit ↔ DirectHit = 零成本自环）；
+    //   4. ★R1b★ 业务节点 next 的**末项必须**是 ``STEP_TAIL``（[JumpBack]SceneEnterWuchong），
+    //      而**末项之前**必须逐字是 ``FLOW_STEPS[i].next``（真后继）—— 真后继被吞 = 动作永不发生
+    //      （R1b 现场）；另外凡是「动作之后识别仍为真」的节点，必须在 ``scene/wuchong.IDEMPOTENT_UNSAFE``
+    //      里**署名**并写明为什么不会再次命中（守卫 ⑥）。
+    //
+    // 【代价（运维要知道的那一条）】接口层每被走到一次，多一次 ``SceneEnterWuchong``（DirectHit，
+    //   ~0.001s）+ 一到两次 ``WuchongIn*`` 识别。验证器是 ``Custom`` 识别器（``wuchong_state``，
+    //   内部跑 OCR，**不享受**框架的 ``prefetch_batch_ocr`` 批量合并）⇒ 一次 **+0.1s** 量级。
+    //   ★R1b 之后它**不再是每轮固定开销**★：只有「真后继全不命中」时才走到末位兜底，频率远低于
+    //   第一版（每步必走）。真机对照仍须量化「+0.1s 有没有抵消 #78 的提速」，
+    //   劣化 >20% 就回退（``scene/wuchong.py`` 的 ``LEGACY_NEXT`` 逃生门）。
+    // ==========================================================================
+
+    // ---------------------------------------------------------------- ① 万能跳转（DirectHit）
+    "SceneEnterWuchong": {
+        // 「从任意界面 → 五重流程的某个已知页」。
+        // ★DirectHit + DoNothing★：它只做**分派**，绝不点任何东西（点位一律留给业务/异常节点）。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": [
+            // ①-a 页面验证器（顺序 = scene.wuchong.IN_SCENE_ORDER）：已经在某个已知页 → 命中即收，
+            //   验证器 next = ["WuchongEntry"] → **交回枢纽**重新分派（零额外点击）。★7 个一个都不能少★：
+            //   漏一个状态 → 该页在接口层里无候选 → 只能回主城重来（可接受，但慢且掩盖问题）。
+            "WuchongInLordList",
+            "WuchongInDetail",
+            "WuchongInMode",
+            "WuchongInRoom",
+            "WuchongInTeam",
+            "WuchongInFight",
+            "WuchongInSettle",
+            // ①-b 掉线 / 被踢回主城 / 卡在别处 → 归位重来（公共事件层，判据只在 common.json 一份）。
+            "[JumpBack]PubReturnHome",
+            // ①-c 其余异常（今天 21 个业务节点开头那 20 项）→ 交给中继，顺序与真源一致。
+            "WuchongGuardChain"
+        ],
+        // 扫超时也回枢纽（DirectHit 理论上永不超时；这一行是「绝不悬空」的兜底）。
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    // ------------------------------------------------- ② 异常中继（DirectHit，20 项阶梯）
+    "WuchongGuardChain": {
+        // 中继：把「今天挂在每个业务节点上的 20 项异常前缀」**原样、同序**收在这里。
+        // ★不设 max_hit★（一局要扫成百上千次；#79 真机：任务级 max_hit 用尽即**静默跳过**
+        //   → 打几把之后异常彻底失守，运维看到的就是「画面卡死」）。
+        // ★内部绝不回指 SceneEnterWuchong / SceneEnter*★（两个 DirectHit 互指 = 零成本自环，
+        //   真机表现是「一秒几百帧、一次点击都没有」）—— 守卫 hooks_103 ③。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": [
+            // ↓↓↓ 顺序 = scene.wuchong.FLOW_EXCEPTIONS（一字不改；守卫 hooks_103 ④ 逐项比对）
+            "[JumpBack]PubReturnHome",
+            // ★#102 P0-1★ 第一步的**模板优先**通道（真源 scene/stamina.py::RECOVERY_STEPS）：
+            //   与下面那条 OCR 版是同一动作（点星导石行框中心），只差行判据（图标模板 vs 行名 OCR）。
+            //   必须排在 OCR 版之前（next 是有序候选，先命中先执行）。
+            "[JumpBack]PubStaminaUseStoneTpl",
+            "[JumpBack]PubStaminaUseStone",
+            "[JumpBack]PubStaminaConfirmOk",
+            "[JumpBack]PubStaminaDoneOk",
+            "WuchongNetError",
+            "WuchongResumeQuest",
+            "WuchongServerUnreachable",
+            "WuchongGiveUp",
+            "WuchongStall",
+            "WuchongNetGuard",
+            "WuchongRenav",
+            "WuchongResume",
+            "WuchongContinueGuard",
+            "[JumpBack]PubGameOverContinue",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]WuchongBonusNo",
+            "WuchongNetDisconnect",
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            // ↓ 回跳闩：★必须是最后一项★（它是 DirectHit，保证阶梯扫不到任何东西时也能**立刻**
+            //   弹栈，而不是让中继空转到 timeout 再走 on_error）。
+            "WuchongGuardDone"
+        ],
+        // 扫超时同样走回跳闩：中继绝不悬在这里（next 末位已是 DirectHit，故这条实际打不到；
+        // 留着是为了「结构上不可能悬空」这条不变量本身可读）。
+        "on_error": ["WuchongGuardDone"],
+        "timeout": 3000
+    },
+
+    // ----------------------------------------------------- ③ 回跳闩（DirectHit，next=[]）
+    "WuchongGuardDone": {
+        // ★next=[] 才是「弹栈」的充要条件★（PipelineTask.cpp:89；也是「任务流程终止」的判据，
+        //   见 3.1 文档「当前节点的 next 列表为空（若存在 [JumpBack] 回跳点，会先回跳）」）。
+        // DirectHit + DoNothing 让它零成本成立：扫完阶梯 → 命中它 → next 空 → 弹回父节点。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": []
+    },
+
+    // ==========================================================================
+    // ④ 7 个页面验证器（WuchongIn*）—— 识别 = 既有 ``wuchong_state`` 的 7 个 state 值
+    //    （与 scene/wuchong.py 的 ``IN_STATES`` 逐字一致；守卫 hooks_103 ① 比对）
+    //
+    // ★全部 next == IN_NEXT（= ["WuchongEntry"]）★：验证器命中 = 「这一步的目标页到了」，
+    //   随后**交回枢纽**按当前页重新分派（WuchongEntry 是 FLOW_STEPS 声明序的分派表）。
+    //   ★空 next 是**任务流程终止**，不是「纯闸门」★（MaaFramework 语义；#103-R1 的致命形态）。
+    // ★动作一律 DoNothing★：验证器绝不点屏幕（点位只属于业务节点与异常节点）。
+    // ★为什么用 OCR 派生的 Custom 而不是模板★：7 个页面里 6 个的既有判据本来就是
+    //   ``wuchong_state``（``agent/wuchong_impl.classify()``），这里**不新造判据**
+    //   （新判据 = 新的脆弱点，研究 §4.2 风险表已记）。
+    // ==========================================================================
+
+    "WuchongInLordList": {
+        // 领主战 / 降临讨伐 列表页「已经在了」（有「五王连战」条目可点）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_lord_list", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["WuchongEntry"]
+    },
+    "WuchongInDetail": {
+        // 五重决战·超级 详情页「已经在了」（标题 + 推荐编成 / 战斗）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_detail", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["WuchongEntry"]
+    },
+    "WuchongInMode": {
+        // 模式选择页「已经在了」（单人游戏 / 多人游戏）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_mode", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["WuchongEntry"]
+    },
+    "WuchongInRoom": {
+        // 共斗房间页「已经在了」。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_room", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["WuchongEntry"]
+    },
+    "WuchongInTeam": {
+        // 编队页「已经在了」（单人 / 多人共用）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_team", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["WuchongEntry"]
+    },
+    "WuchongInFight": {
+        // 战斗中「已经在了」（底部 HUD「时间 HH:MM」+「分数 N」）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_battle", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["WuchongEntry"]
+    },
+    "WuchongInSettle": {
+        // 结算 / 奖励页「已经在了」。
+        // ★注意★：招募方式弹窗（``wuchong_recruit_dialog``）**故意不做验证器** —— 它是模态
+        //   弹窗、不是「页」，且它有自己的唯一出路（WuchongRecruitStart）。把它做成验证器会让
+        //   「弹窗在屏」被当成「到位」，与 #56 的 P0（弹窗必须先走开始招募）冲突。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_settle", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["WuchongEntry"]
+    }
+}
