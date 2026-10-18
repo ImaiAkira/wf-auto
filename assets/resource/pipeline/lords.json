@@ -1,0 +1,477 @@
+{
+    // ============================================================================
+    // 领主战 / 降临讨伐【全难度解禁】（ticket #100）—— 离线可测部分
+    // ============================================================================
+    // 循环语义（运维裁决 D6，口径 (a)）见 docs/spec/runner-delivery.md §4.4：
+    //   1. 进列表 → 读**每一行**的 `通关数 N/M`；
+    //   2. 打掉所有 N<M 的领主（每个从**最低未通关档**往上打）；
+    //   3. 回列表**重读**，重复；
+    //   4. 终结：全 M/M（主）+ 连续 2 轮无新解锁（兜底）+ 场次上限 60（兜底，带原因收工）；
+    //   5. ★防死循环★：每轮必须至少打一场才允许继续，否则带原因退出。
+    //
+    // 分工（★别把两件事混在一起★）：
+    //   · 本文件只负责**页面流转**：进列表 → 读 → 点目标 → 交给战斗/结算 → 回列表；
+    //   · **判定**（解析 N/M、算该打哪一档、三条终结、防死循环）全部在
+    //     `scene/lords_unlock.py`（纯逻辑真源，离线可单测 + 守卫 hooks_100）；
+    //   · **点哪一下**（目标行 / 该档的【战斗】/ 编队页【挑战】）全部在
+    //     `agent/lords_impl.py`，本文件不写任何坐标 —— 坐标一律来自**当帧 OCR 框**。
+    //   ⇒ 本文件**没有**写死的点击坐标，也没有第二份判据串。
+    //
+    // ==== 节点纪律（照 special_dungeon.json::SpecialEntry 的形状）====
+    //   · `LordsEntry` 是**枢纽**：所有业务节点的 `next` 末项都回指它；
+    //   · 业务节点 `next` = 异常前缀（`[JumpBack]Pub*` 公共节点）+ 后继 + 枢纽；
+    //     `on_error` 一律回枢纽（ADR-0002：链式拓扑必须补回中心枢纽的自恢复边）；
+    //   · 枢纽自身 = 异常前缀 + 流程节点 + 归位 + **自环轮询**（自环就是它的等待节点：
+    //     不必再造一个 `LordsWait`，`post_delay` 就是轮询周期）。
+    //
+    // ==== #100 第 1、2 条真机缺口：页签切换 + 列表滚动（本票新增）====
+    //   四个导航节点 + 一个手势节点，判据/数值的**真源全部在 `scene/lords_nav.py`**
+    //   （纯数据 + 纯逻辑，离线单测 `tools/test_lords_nav.py`、守卫 `hooks_100`）：：
+    //     · LordsSwitchTab  —— 页签（★切后必须复核确认★：确认 = 可见行族一致指向目标页签，
+    //       不是「读得到标签」——两个标签常驻同屏。失败只许 1 次，绝不重试：#19 竞速死循环）
+    //     · LordsScanPage   —— 读当前页**全部**行（滚动前）：去重累计（键 = 行名 + N/M）+ 到底判据
+    //     · LordsListEnd    —— 「到底了」判据（连续 2 次「无新行 ∧ 纵向不动」）；并推进页签扫描
+    //     · LordsScrollOnce —— 滚一次（★自带时间闩 ≥1.2s★；★绝不用 max_hit 限次★：#50 的
+    //       命中级计数是**按任务**共享的，用尽会被框架静默跳过 → 目标行永远滚不到）
+    //     · LordsSwipeOnce  —— 手势几何（只由 lords_unlock_step{do:scroll} 用 run_action 调用）
+    //   两个自定义名沿用既有注册（`lords_progress` 加 mode、`lords_unlock_step` 加 do）——
+    //   仓内先例：SpecialEnterBoss 的 `special_batch_fight{row_click:true}`（#20/#42 把 runner
+    //   侧注册表锁死，新增名字会让套件变红，故用显式参数区分语义）。
+    //
+    // ============================================================================
+    "LordsEntry": {
+        // 【枢纽 + 入口】本文件唯一的入口与回位点。
+        // `post_delay: 800` = 轮询周期：next 全不中时靠末项自环（DirectHit）重扫。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 800,
+        "next": [
+            // ── 异常前缀（公共节点，全部 [JumpBack]：处理完弹回本枢纽）────────────────
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            // 「讨伐完成」奖励弹窗（#67）：领主战页面上真的会出现（与战阵之宴同一张），
+            // 不认它就会整批停在弹窗上。
+            "[JumpBack]PubRewardDoneClose",
+            // 结算推进：`^继续$` / 顶部 QUESTRESULT 横幅（raid.json 坑点 5：点顶部横幅
+            // 绝不会碰到底部并排的 OK / 再次挑战）。
+            "[JumpBack]PubResultContinue",
+            "[JumpBack]PubQuestResult",
+            // GAMEOVER：★领主战族刻意不续关★（续关要花星导石×50，见
+            // special_dungeon.json:1236-1238）—— 只点【放弃】+ 确认。
+            "[JumpBack]PubGameOverGiveUp",
+            "[JumpBack]PubGameOverGiveUpFallback",
+            "[JumpBack]PubGameOverConfirm",
+            "[JumpBack]PubGameOverConfirmFallback",
+            // ── 流程节点（按页面优先级）────────────────────────────────────────────
+            // ① 页签：本轮该在哪个页签上（有目标 → 由标行的子族决定；扫描期 → 扫描顺序）
+            "LordsSwitchTab",
+            // ①b ★回顶部★：每一页开扫前都要先证明自己在顶部（#100 第 6 轮真机验收：
+            //    战后列表停在被点行处，不先回顶部就向下扫只会读到 4 行就判「到底」）
+            "LordsScrollTop",
+            // ② 页扫描：把这一页读全（去重累计，供「到底」判据用）
+            "LordsScanPage",
+            // ③ 到底：这一页滚到底了 → 推进到下一个页签（两个都扫完就把整份读数交给判定）
+            "LordsListEnd",
+            // ④ 有目标待点：点目标行 / 该档【战斗】 / 【挑战】（三个页面各一次命中）
+            "LordsPickTarget",
+            // ⑤ 目标行不在屏上：滚一次继续找（★必须排在选行之后★：#29 的形态）
+            "LordsScrollOnce",
+            // ⑥ 领主战**自己的**模式选择页（单人/多人）→ 点「单人游戏」（#100 第 4 个真机缺口）
+            //   ★必须排在 mode=read 之前★：这一页读不到「通关数」/「更新列表」，旧链上所有节点
+            //   都 no-hit，枢纽自环 = 看起来在跑（真机 12:4x 就卡在这里）。
+            //   判据/文案/位置全部在 scene/lords_nav.py（lords 自己的 `lords_mode` 状态名 +
+            //   四段文案 + 象限位置），**不借用五重的 wuchong_mode**（跨场景状态名混用会让
+            //   排查时说不清是谁的页面 —— 今晚已经吃过一次苦）。
+            "LordsModeSolo",
+            // ⑥b 在列表页但导航节点都用不上时：读 N/M（既有语义，兜底）
+            "LordsReadProgress",
+            // ⑦ 战斗中：等 HUD 消失 + 推进结算（★必须排在 ⑧ 之前★，见下）
+            "LordsAfterFight",
+            // ⑧ 在主城：点【领主战】进列表
+            "LordsOpenList",
+            // ── 归位 + 轮询 ───────────────────────────────────────────────────────
+            // 归位只在**不在主城分区**时命中（#29 收紧过：主城分区任何页面都不命中），
+            // 所以它不会把「正停在列表页」误判成需要回主城。
+            "[JumpBack]PubReturnHome",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsReadProgress": {
+        // 【读列表】custom_recognition `lords_progress`（mode=read）。
+        //   命中条件：这一帧能读到**至少一行** `通关数 N/M`（= 确实是领主战列表页）。
+        //   不命中：不在列表页（交给枢纽的其它节点），或这一帧读不出进度（脏帧）。
+        //   ★扫描闸（R1/R2 的补洞）★：扫描阶段（`page_pending` 为真）且页签**未确认**到目标页签时，
+        //   它**不规划**（返回未命中，让枢纽继续推进导航）。修前 nav 节点全 no-hit 时它会按
+        //   **错页签的单帧**规划 —— 把别的子族的行记进本轮，或把「首屏恰好都 M/M」当「全部解禁」。
+        //   扫描收尾（LordsListEnd）喂的**合成帧**走 synthesized=True，不受这条闸影响。
+        // detail 里带**结构化的行列表**（每行 name/n/m/box），便于日志与现场复核。
+        // ★收工出口★：判定该收工/全通/点不出去时，识别器自己 `override_next` 到 LordsStop。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "read", "ocr_entry": "OcrTask" }
+            }
+        },
+        // 读只是读，不点任何东西（box=[0,0,0,0] = 命中但没有要点的框）。
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 400,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "LordsPickTarget",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsPickTarget": {
+        // 【点到位】custom_recognition `lords_progress`（mode=pick）+ custom_action `lords_unlock_step`。
+        //   识别器从**当帧 OCR** 里选出「下一处该点的框」，动作把它点下去，一次只点一下：
+        //     列表页 → 目标行的行名框（stage=detail）
+        //     详情页 → 目标档那一行的【战斗】框（stage=team；档位静态未采集时取最上面那个）
+        //     编队页 → 【挑战】框（stage=fight：点下去就开打，控制权交回本文件）
+        //   ★【挑战】的判据在 agent 侧单源★：`agent/lords_impl.find_challenge_box` 用
+        //   `battle_loop_core.PAGE_CHALLENGE_PATTERNS`（= scene/challenge.py 的逐字快照，
+        //   `^挑战(→)?$`：整串锚定 + 至多一个箭头）。本文件**不复制**这个串 —— 判据唯一（ADR-0003），
+        //   复制一份就是下一次「只改了一处」的漂移。
+        //   ★禁双击★：点过挑战后 `lords_progress` 拒绝再点，直到读回列表（或有界 180s 超时）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "pick", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "lords_unlock_step", "custom_action_param": {} }
+        },
+        // 点完等一下页面（真机翻页 1~2s；这里只做短延时，长等待交给 LordsAfterFight/枢纽）。
+        "post_delay": 800,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "LordsAfterFight",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsAfterFight": {
+        // 【战斗 → 回列表】判据 = 公共 HUD（And(时间 \d+:\d+, 分数 \d)：
+        //   `PubBattleTime` / `PubBattleScore`，与 special_dungeon.json::SpecialBattleWait 同一份）。
+        //   ⚠ 绝不用裸「时间」/裸「分数」：编队页提示条与结算页奖励条都含这两个词
+        //   （raid.json 坑点 1 / 6：32 分钟 1244 圈空转的真机事故）。
+        //   ⚠ GAMEOVER 页底部**仍然画着 HUD**（GLOSSARY.md:32-35），所以枢纽把
+        //   [JumpBack]PubGameOver* 排在本节点所属链的异常前缀里 —— 失败页先被接住。
+        // 本节点只**等**：命中即 DoNothing（什么都不点），战斗结束后由 next 继续推进结算；
+        // 结算完成 → 回枢纽/LordsReadProgress 重读（= 循环的第 3 步）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubBattleTime", "PubBattleScore"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubRewardDoneClose",
+            "[JumpBack]PubResultContinue",
+            "[JumpBack]PubQuestResult",
+            "[JumpBack]PubGameOverGiveUp",
+            "[JumpBack]PubGameOverConfirm",
+            "LordsReadProgress",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsOpenList": {
+        // 【进列表】主城 → 点【领主战】。
+        //   判据与 ROI **逐字同步** special_dungeon.json::SpecialOpenLord（真机点击点 (608,1135)），
+        //   由 hooks_100 钉住（本文件不 import 别的 pipeline，只能靠守卫防漂移）。
+        //   ROI 限右下角：避开列表页/详情页里的「领主战」文字（那会把「已经在列表页」误判成主城）。
+        //   ⚠ 这里**不**引用 [JumpBack]SpecialOpenLord：它的 next 收在 "SpecialEntry"，
+        //   [JumpBack] 进去会把整条 special 业务链当成本节点的子链跑起来。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["领主战"], "roi": [480, 1080, 240, 140] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 2500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            // ★先进页签/页扫描★：`LordsReadProgress` 只看得见**当前这一帧**，在列表顶部直接判
+            // `all_done` 会把「首屏恰好都 M/M」当成「全部解禁」（假收工）。扫描阶段由
+            // `LordsScanPage` 接手；它用不上时（门已关）才落到既有的读列表。
+            "LordsSwitchTab",
+            "LordsScrollTop",
+            "LordsScanPage",
+            "LordsReadProgress",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    // ========================================================================
+    // 导航（#100 第 1、2 条真机缺口）：页签 / 页扫描 / 到底 / 滚一次 / 手势
+    // ========================================================================
+    "LordsSwitchTab": {
+        // 【页签】`lords_progress`（mode=tab）+ `lords_unlock_step`{do:tab}。
+        //   目标页签由**目标行的子族**决定（#19：页签由目标决定，绝不靠 max_hit 竞速）；
+        //   扫描期没有目标 → 由扫描顺序（领主战 → 降临讨伐）决定。
+        //   ★切后确认★：确认条件 = **可见行族一致指向目标页签**（scene/lords.py 的 kind +
+        //   row_regex → SUBFAMILY_BY_KIND）。★不是「读得到页签标签」★ —— 两个标签常驻同屏
+        //   （真机帧 lord_page_tab_lord.png 一帧里两个都在，score 0.9998 / 0.9997）。
+        //   ★失败不重试★：点满 1 次仍未确认 → 不命中（把这一圈让给后继节点），由
+        //   `agent/lords_impl` 的时间死线（NAV_STUCK_SEC=30s）带原因收工。
+        //   ★点击点 = 当帧 OCR 框中心★（不写死坐标；与 SpecialTab* 的实测点 (180,405)/(540,404)
+        //   逐帧对账，见 hooks_100 的 lords-tab-confirm）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "tab", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "lords_unlock_step", "custom_action_param": { "do": "tab" } }
+        },
+        "post_delay": 1200,
+        // ★节拍预算★（= hooks_100 的 lords-beat-budget；口径同 #78 对五重的那一份）：
+        //   timeout 3000 ≤ 上限（本节点是 OCR 派生识别，卡住时不许无限等）；
+        //   post_delay 1200 在**白名单**里（切完页签列表要重排、页签闸要重读一帧 —— 真机
+        //   SpecialTab* 也是 1200）。
+        "timeout": 3000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "LordsScrollTop",
+            "LordsScanPage",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsScanPage": {
+        // 【页扫描】`lords_progress`（mode=page）：读当前页**全部**行（滚动前）。
+        //   · 去重累计：键 = (行名, N/M) 只判「**本帧**这一行读没读过」；**累计表按行名留最新读数**
+        //     （N 变大即覆盖）—— 按 (行名, N/M) 存多条会让第 2 轮同时留着 1/4 与 2/4，
+        //     plan_round 取第一条 ⇒ 反复打刚打完的档（R1）；
+        //   · 到底判据：拿这一帧和**滚动前那一帧**比（新行数 / 纵向位移），按**滚动世代**记账
+        //     （同一世代只记一次、没真的滚过不记账）—— 否则本节点被 [JumpBack]PubLoadingWait /
+        //     PubDailyPopup 弹回来重读同一屏，两帧就判「到底」（其实一次都没滚，item 7）；
+        //   · ★页签未确认就不读★：在错的页签上读 = 把别的子族的行记进本轮。
+        //   本节点**不规划**：规划与三条终结仍归 mode=read（`LordsListEnd` 在两个页签都扫到底
+        //   之后，把累计读数交给它 —— 合成帧先做逐项复原核对，对不上就不规划）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "page", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 400,
+        // 节拍预算：timeout 3000（#100 新增节点必须显式声明上限，见 hooks_100 的 lords-beat-budget）。
+        "timeout": 3000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            // 先判到底（到底就不许再滚），再滚一次。
+            "LordsListEnd",
+            "LordsScrollOnce",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsListEnd": {
+        // 【到底】`lords_progress`（mode=end）：命中 = **这一页滚到底了**。
+        //   判据（真源 `scene/lords_nav.NavState.observe`）：连续 2 个**滚动世代**之后
+        //   「没有任何没见过的行」∧「共有行的纵向位移 ≤4px」（列表不再往下走）。
+        //   ★同一世代只记一次、没真的滚过不记账★（修前连读两帧同一屏就判到底）；
+        //   ★尾部锚点（「已无更多」之类）机制已接好，但当前数据为空★：仓内没有滚到列表底部的
+        //   真机帧（调研 §4 第 13 项待采集），所以不猜文案。
+        //   命中后的动作：推进页签扫描（`advance_tab`）；两个页签都扫完 → 把**整份读数**
+        //   交给既有的 mode=read 判一轮（plan / 三条终结 / 收工出口全部复用）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "end", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 600,
+        // 节拍预算：timeout 3000（#100 新增节点必须显式声明上限，见 hooks_100 的 lords-beat-budget）。
+        "timeout": 3000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            // 扫完一个页签 → 切到下一个页签（切后确认由 LordsSwitchTab 自己做）；
+            // 下一页签同样先从**顶部**开始（「到底」是相对滚动位置的概念）。
+            "LordsSwitchTab",
+            "LordsScrollTop",
+            "LordsScanPage",
+            "LordsPickTarget",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsScrollOnce": {
+        // 【滚一次】`lords_progress`（mode=scroll）+ `lords_unlock_step`{do:scroll}。
+        //   ★★这里**故意没有 `max_hit`**★★（#50 的教训）：框架的命中级计数是**按任务**共享的，
+        //   一个 chunk 里几个深行成员共用一个预算，用尽后本节点会被**静默跳过** → 目标行永远
+        //   滚不到 → 空转（原生日志 `max_hit reached [data.name=SpecialScrollList]`）。
+        //   本节点的次数控制只有三条，且**每条都带原因**：
+        //     ① **时间闩**：两次滚动之间 ≥1.2s（`SCROLL_PLAN.min_interval_sec`，动作里兜底补睡）；
+        //     ② **到底判据**：`LordsListEnd` 命中后不再滚（连续 2 次无新行/无位移）；
+        //     ③ **每页上限 80 次（兜底）**：用尽 → `agent/lords_impl` 直接**带原因收工**，
+        //        绝不静默跳过（半扫一遍的列表判不了「全部解禁」）。
+        //   `post_delay: 2600` = `SCROLL_PLAN.settle_ms`（= SpecialScrollList 的 post_delay，
+        //   #42 真机：受控滚动之后列表还有惯性，稳定前不许点行）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "scroll", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "lords_unlock_step", "custom_action_param": { "do": "scroll" } }
+        },
+        "post_delay": 2600,
+        // 节拍预算：timeout 3000 ≤ 上限；post_delay 2600 在**白名单**里，且它不是随手写的 ——
+        //   必须 == scene/lords_nav.SCROLL_PLAN.settle_ms（hooks_100 的 lords-beat-budget 与
+        //   lords-scroll-latch 双向对账）。理由：#42 真机：受控滚动之后列表还有惯性，稳定前
+        //   点行就会点飞；这一等不能砍到 1000 以下。
+        "timeout": 3000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "LordsScanPage",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsScrollTop": {
+        // 【回顶部】`lords_progress`（mode=top）+ `lords_unlock_step`{do:scroll_top}。
+        //   ★每页开扫前先回顶部★（#100 第 6 轮真机验收，`debug/lords_accept6.log` 18:40–18:47）：
+        //   战后列表停在**被点行**处、切页签也停在上次的滚动位置 —— 而「到底」是**相对滚动位置**
+        //   的概念：不回顶部就向下扫，只会读到目标行附近那几行就判「到底」（真机：第 2 轮
+        //   「领主战」只读到 4 行、两页签共 4 行 / 目标 0；而画面上还有 红嫉机兵 1/4、
+        //   苍叹机兵 1/4、妖狐讨伐 3/4 —— 全是没读到的未通关行）。
+        //   判据（`scene/lords_nav.NavState.observe_rewind`）：连续 2 个「回顶部世代」都
+        //   「无新行 ∧ 纵向上移位移 ≤4px」⇒ 已到顶部；上限
+        //   `SCROLL_PLAN.max_rewinds_per_page`=24（有界；用尽 ⇒ 带原因收工，绝不无限上滚）。
+        //   ★next 第一个非弹窗项是它自己★：每上滚一次都**重新判**有没有到顶；到顶后同一圈
+        //   就交给 `LordsScanPage` 往下扫（不必多等一轮枢纽）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "top", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "lords_unlock_step", "custom_action_param": { "do": "scroll_top" } }
+        },
+        // post_delay 800（≤ 1000 的节拍契约）+ 动作里补足 `SCROLL_PLAN.settle_ms` 2600
+        // （#42 真机：受控滚动之后列表还有惯性，稳定前读下一帧会把「到顶」判据打穿）。
+        "post_delay": 800,
+        // 节拍预算：timeout 3000（新节点必须显式声明上限，见 hooks_100 的 lords-beat-budget）。
+        "timeout": 3000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "LordsScrollTop",
+            "LordsScanPage",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsSwipeOnce": {
+        // 【手势】滚一次的**几何**（720 空间）。★不进任何 next / on_error★ —— 只由
+        // `lords_unlock_step`{do:scroll} 用 `context.run_action("LordsSwipeOnce")` 调用
+        // （与 common.json::PubClick 同一手法：跑动作不走识别）。
+        //   数值逐字段 = `scene/lords_nav.SCROLL_PLAN`（真机出处 = special_dungeon.json::
+        //   SpecialScrollList）：行程 400px（1040 → 640）、duration 800（拖拽而不是甩动，#42）、
+        //   两端都在列表体 y∈[440,1180] 内（#36：起点踩到底部导航带会让列表不吃这一笔，
+        //   抬手处被当成「选行」→ 打开别人的详情页）。
+        //   ★必须是两元素定点 `[x, y]`★：MAA 的四元素 `[x,y,w,h]` 是**区域**（会在矩形内随机
+        //   取点，w/h=0 时延伸到屏幕边缘）→ 旧写法实际是随机斜向拖拽（#42 真机 begin x∈[362,710]）。
+        //   守卫 hooks_100 的 lords-nav-pipeline-wiring 逐字段对账本节点与 SCROLL_PLAN。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 1040], "end": [360, 640], "duration": 800 }
+        },
+        "post_delay": 0,
+        // 节拍预算：timeout 3000（DirectHit 理论上立刻命中；这一行是「绝不悬空」的兜底）。
+        "timeout": 3000,
+        "next": []
+    },
+    "LordsModeSolo": {
+        // 【模式选择页 → 单人】`lords_progress`（mode=solo）+ `lords_unlock_step`（缺省 = 点
+        //   识别选出的那一处）。
+        //   真机现场（B，12:4x）：点完 row → 详情页、点完 tier → 这一页
+        //   （单人游戏 / 单人挑战领主 / 多人游戏 / 召集同伴挑战领主），旧链把它判成别的场景的
+        //   `wuchong_mode`，lords 状态机不认识 ⇒ 卡住。本节点是 lords **自己的**那条路：
+        //     · 判据（scene/lords_nav.py）：状态名 `lords_mode` = 四段文案**同时在各自象限**
+        //       （单人两张卡在左上、多人两张卡在右下）且「单人游戏」比「多人游戏」高 ≥200px；
+        //     · 点的是「单人游戏」**当帧 OCR 框的中心**（★不写死坐标★；真机对账：框中心
+        //       (170,523) ≈ special_dungeon.json::SpecialModeSolo 的实测点 (170,523)）；
+        //     · ★绝不点「多人游戏」★：那是共斗房（开别人的房间）。
+        //   点完**轮询读帧**（每 0.4s 读一次，单点最多 8s / 读次数有界 21；**连续 3 帧仍是模式页**才算没生效
+        //   —— 固定等 2.5s 读一帧会误判：真机实测第 2 帧是 `lords_mode` 瞬时帧、第 3 帧才到编队页）：
+        //   中心 → 下方 100 → 右侧 120 → 下方 180（相对当帧框中心），最多 LORDS_MODE_MAX_ATTEMPTS=4 个点。
+        //   ★真机真因（B，15:5x）★：点单人卡会弹**「领主加成点数」确认框**
+        //   （`要使用增加报酬的『领主加成点数』吗？` + 是/否，今天剩余次数 x3）；
+        //   读到它（问题锚 + 当帧「否」框）就点「否」，同一点只尝试 1 次
+        //   （上限 LORDS_MODE_MAX_DIALOG_CLICKS=1），确认后重给完整读窗口。
+        //   四个点 + 确认全试完还没到编队页 ⇒ 动作层带原因收工，**文案只写读数**（`state=… 锚=…`），
+        //   不写「画面仍是模式页」这种推断句。
+        //   ★复核只认正向证据★：`team_page_confirmed` = 有【挑战】∧ SET/Party/自动续战 至少一个；
+        //   瞬时帧（`lords_unknown`）**不算成功** —— 旧写法「离开了模式页即成功」制造过假成功。
+        //   ★盲点闸★：框缺失/零尺寸/中心 (0,0) ⇒ 拒绝点击（`_click_target`），`_click_hook` 不被调用。
+        //   next 先回枢纽：让 `mode=tab` 在**下一帧**复核「是否已到编队页（挑战）」
+        //   （detail.mode_verify = team_page），再交给 LordsPickTarget 点【挑战】。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "lords_progress",
+                "custom_recognition_param": { "mode": "solo", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "lords_unlock_step", "custom_action_param": {} }
+        },
+        // 点完等一下转场（与 LordsPickTarget 同口径 800ms）；长等待交给枢纽轮询与死线。
+        "post_delay": 800,
+        // 节拍预算：timeout 3000（新节点必须显式声明上限，见 hooks_100 的 lords-beat-budget）。
+        "timeout": 3000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "LordsEntry"
+        ],
+        "on_error": ["LordsEntry"]
+    },
+    "LordsStop": {
+        // 【收工出口】DirectHit + StopTask（照 special_dungeon.json::SpecialBatchStop）。
+        // 由 `lords_progress` 在判定「该收工」时用 `context.override_next` 指过来：
+        //   全 M/M（主）/ 场次上限 60 / 连续 2 轮无新解锁 / 本轮零目标 / 20s 点不出去。
+        // ★原因写在 agent 侧日志与识别 detail 里★（D4：用户可见输出只有「收工原因」），
+        // 本节点不重造文案 —— 它是**唯一的**「有界结束」路径。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": []
+    }
+}

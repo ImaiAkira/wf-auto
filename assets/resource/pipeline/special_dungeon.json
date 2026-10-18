@@ -1,0 +1,1337 @@
+{
+    // ============================================================================
+    // 特殊副本自动刷（领主战 / 降临讨伐）—— 16448 实测
+    // 入口：SpecialEntry
+    //
+    // 【铁律 1：本文件必须自包含】
+    //   绝不复用其它 pipeline 文件的节点。踩过的坑：复用会让 next 跳进别的文件的
+    //   分派器（例如 push 到 AutoPush）。这里每个节点的 next 一律指回 SpecialEntry。
+    //   ★唯一例外（本次合并新增）★：SpecialEntry 分派表里引用了 farm.json / raid.json /
+    //   phantom.json 的「种类分派器」FarmDispatch / RaidDispatch / PhantomDispatch ——
+    //   它们是【自定义识别 batch_mode 门控】的开关节点，只有当前种类匹配时才命中（种类由
+    //   SpecialBatchPlan 的指挥官或任务入口决定）；其它模式下永不命中，故不违反「不误入
+    //   别文件分派器」的本意。
+    //   反向也被约束：farm/raid/phantom 链上所有节点的 next 一律回 SpecialEntry。
+    //
+    // 【铁律 2：绝不做盲目兜底点击】
+    //   认不出的画面只等待（SpecialWait = DirectHit + DoNothing），不满屏乱点。
+    //
+    // 【铁律 3：固定 target 一律两点式 [x,y]】
+    //   禁止 [x,y,0,0]：零尺寸矩形会让整个任务 FAILED（已踩过）。
+    //   target_offset 是「相对识别框」的偏移量，不是固定 target，沿用 4 元素写法。
+    //
+    // 【铁律 4：战斗判据必须带格式（规格 A3）】
+    //   战斗中 HUD OCR 实测 = 「时间 09:53」「分数 00000082254」。
+    //   ❌ 裸「时间」/「分数」会被结算页奖励条「最长滞空时间6秒」「战斗分数」误命中
+    //      → And 恒为真 → 无限空等死循环（raid 曾空转 32 分钟 1244 圈）。
+    //   ✅ 用「时间 \d+:\d+」「分数 \d」。
+    //   为稳妥，SpecialBattleWait 仍排在分派链【倒数第二】，只高于 SpecialWait。
+    //
+    // 【铁律 5：不要 max_hit: 0】
+    //   0 = 该节点被完全跳过。要「无限」就留空。
+    //   max_hit: 1 用于「一次性开关/一次性选择」节点，防止同屏幂等反复点击导致饿死后续节点。
+    //
+    // 坐标空间：一律 720。点击用 1080 坐标请自行 ×1.5（本文件不写 1080）。
+    // ============================================================================
+    "SpecialEntry": {
+        // 分派顺序 = 优先级。前半是加载/弹窗/一次性设置，中间是各页面的识别，
+        // 结算处理排在战斗判定之前，SpecialBattleWait 倒数第二，SpecialWait 兜底。
+        // ★SpecialStallRecover 紧随公共换日弹窗、很靠前★：每轮都评估，卡死（画面连续无变化达阈值）
+        //   时立即收尾/重开，绝不空转（需求 #3）。
+        //
+        // ★#44 混排清单：一个条目只有在【走过它自己种类的导航/开打】之后才能记账★
+        //   实测（logs/mixed.log / frames/mixed/f_0088…f_0264）：切到 战阵之宴 / 光之迷宫 后，
+        //   指挥官只点了一次「主城」就假定已回中立页，于是 RaidDispatch / FarmDispatch 在
+        //   【上一场战斗的结算页】上命中了残留的「再次挑战」（action 带 record="always"）→
+        //   假记账（记账成功、实际没打）；幻想连战则停在【陈旧的猩红巨熊详情页】上空转到超时。
+        //   现由 agent（special_batch_plan / batch_mode / special_batch_finish）把守：
+        //     · 切条目时若画面【可读且明确不是主城】（修行之道/成长任务/当前进度 三个独有锚点），
+        //       三个种类分派器被封锁，指挥官持续归位，直到确认中立页才放行下一条
+        //       —— 陈旧界面绝不被「别的种类」的链动作或记账碰到；
+        //     · record="always" 的结算节点在【本条目尚未走过自身导航】前既不点击也不记账；
+        //     · 不做导航的战阵之宴从主城到不了 → 按导航超时明确跳过并记录原因（绝不假记账）。
+        //   守卫：tools/contract_hooks/hooks_44.py（prove-red 同文件）。
+        //
+        // ★#45 混排清单：战阵之宴 / 光之迷宫 = 【配置层声明的能力缺口】，不再靠「超时」★
+        //   承接上面 #44 第 3 条（「不做导航的战阵之宴从主城到不了」）：#45 把这件事从
+        //   「导航宽限用尽才跳过」升级为【配置自己声明的能力缺口】——
+        //     · 声明位：farm.json 头部 #45 段、raid.json 头部 #45 段，以及
+        //       agent/side_impl.py 的 UNREACHABLE_FROM_MAIN_CITY（三处是同一条声明）；
+        //     · 运行期：从主城出发的批量清单里遇到这两类条目 → 一确认中立页即【明确跳过
+        //       并记录原因】（宽限 grace_sec = 0，不再等 45s / 120s），绝不假记账、绝不空转；
+        //     · 单目标（清单为空，FarmEntry / RaidEntry 入口）行为不变。
+        //   守卫：tools/contract_hooks/hooks_45.py（把三处声明与运行期行为钉在一起，prove-red 同文件）。
+        //   ★#45 的精确诊断（真机 16448，2026-10-14）★：
+        //     · raid：设计上不做导航、需用户先手动打开战阵之宴页面 → 主城无入口 → 不可达；
+        //     · farm：主城横幅入口【可达】（FarmMazeEntry 命中并进迷宫页），但现版本迷宫页
+        //       行名是「摇曳的迷宫 <域>【<元素>】」（无难度档位），与配置目标「<元素>之迷宫
+        //       <难度>」对不上 → 到得了页面却开不了打。两者都是【能力缺口】，不是运行期故障。
+        //
+        // ★#62 单个「能导航进详情页、却配不出战斗」的成员：有界跳过，绝不吃掉整批★
+        //   真机（127.0.0.1:16448，chunk_j4）实测：列表里 `方舟守护者讨伐` 排第一，导航进
+        //   它的详情页（身份校验 match：`标题='方舟守护者'`），但该行【战斗】按钮那一帧被
+        //   OCR 读成单字 `5`（框 [93,506,7,7]）→ SpecialFightTargetRow 的 special_target_fight
+        //   配不出战斗框 → 详情页无法推进 → 整条清单在它身上空转到 1200s 超时（账本为空），
+        //   **后面 4 个成员一个都没被尝试**；单独重跑那 4 个（chunk_j4b.log）4/4 正常。
+        //   本票的「有界规则」在 agent 侧实现（agent/side_impl.py 的 #62 段，见那里的完整注释）：
+        //     · 停在【自己的详情页】却配不出战斗超过 _UNFIGHTABLE_DETAIL_SEC（20s）→ 指挥官
+        //       记明原因、跳过该目标、继续清单（没有别的目标可继续则按策略收工）；
+        //     · 兜底：special 条目从开始导航起超过 _SPECIAL_NAV_DEADLINE_SEC（420s）仍没走到
+        //       自身开打 → 同样明确跳过（覆盖「详情页连 `推荐编成` 标记都读不到」的形态）。
+        //   ★协同 #39/#41 的难度发现★：详情页没有 `推荐编成` 标记 / 读不出难度行时，走的是
+        //     【明确的跳过/收工】分支（#39 的 absent→跳过、undetermined→收工；#62 的有界跳过），
+        //     绝不空转。守卫 + 真机帧 + 破坏实验见 tools/contract_hooks/hooks_62.py。
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            // ★#67 领主战页面上的「讨伐完成」奖励弹窗（战阵之宴奖励）★
+            //   真机 16448（#33 part-B）：领主战清单【开跑前】就停在「讨伐完成 [84,436,552,110] /
+            //   关闭 [326,957,67,39]」这张弹窗上（清掉它后整屏 OCR = 战阵之宴 RAID 页）——
+            //   此前本文件没有节点认它 → 整批在第一帧被它挡住、无进展地空滚到超时。
+            //   判据收敛在公共 common.PubRewardDoneClose（与 raid.json::RaidPopupClose 同一份），
+            //   这里只 [JumpBack] 引用（不复制判据）；点【关闭】框中心，读后动、绝不盲点/死偏移。
+            //   排在 SpecialStallRecover 之前：静止的弹窗帧不得被卡死看门狗当成「卡死」而重开游戏。
+            "[JumpBack]PubRewardDoneClose",
+            // ★「体力不足 → 星岛石恢复」★（scene/stamina.py 是真源）：领主战族「战斗」消耗体力，
+            //   不足时游戏弹回复体力弹窗 —— 共享节点「先点星导石行、再点确认框 OK」（只用星岛石）。
+            //   排在看门狗之前：静止的弹窗帧不得被卡死看门狗当成「卡死」而重开游戏。
+            // ★#102 P0-1★ 第一步的**模板优先**通道（真源 scene/stamina.py::RECOVERY_STEPS）：
+            //   与下面那条 OCR 版是同一动作（点星导石行框中心），只差行判据（图标模板 vs 行名 OCR）；
+            //   必须排在 OCR 版**之前**（next 是有序候选，先命中先执行）。
+            "[JumpBack]PubStaminaUseStoneTpl",
+            "[JumpBack]PubStaminaUseStone",
+            "[JumpBack]PubStaminaConfirmOk",
+            "[JumpBack]PubStaminaDoneOk",
+            // 公共换日弹窗（common.json）：最临时的全局打断，放最前，
+            // 保证任何画面（含批量清单指挥官）下都优先点掉它再继续。
+            "SpecialStallRecover",
+            // 公共账号页/标题页推进（common.json）：原地替换原 SpecialLoginContinue/SpecialTitleStart。
+            // ★等价性★：二者原 next=["SpecialEntry"]（调用者即 SpecialEntry）→ [JumpBack] 等价。
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            // ★批量副本清单指挥官★：放在最前（紧挨卡死兜底），每轮都评估。
+            //   清单为空时永远不命中（向后兼容单目标旧逻辑）；命中时负责
+            //   切换目标 / 归位主城 / 收工。实现见 agent/side_impl.py。
+            "SpecialBatchPlan",
+            // ★#38 战斗失败 / GAMEOVER（「是否续关？」）★：排在该指挥官之后（它据此帧记一次
+            //   连续失败、清 in_fight）、种类分派器【之前】（batch_mode 分派器只按 _BATCH_MODE
+            //   命中、不看画面，失败画面必须先被这组接住）。两页：GAMEOVER 页拒绝续关（读
+            //   【放弃】框点击，绝不点【续关】——那要花星导石×50），随后确认框读【OK】推进。
+            //   ★Fallback★：只认页面锚点后点实测坐标，防按钮二字 OCR 抖动 → 绝不卡死。
+            //   定义在 common.json（公共节点），此处以 [JumpBack] 引用。
+            "[JumpBack]PubGameOverGiveUp",
+            "[JumpBack]PubGameOverGiveUpFallback",
+            "[JumpBack]PubGameOverConfirm",
+            "[JumpBack]PubGameOverConfirmFallback",
+            // 公共加载等待（common.json）：纯等待不点击；沿用原 SpecialLoadingWait 的位置。
+            // ★种类分派器（把「重复刷图 / 战阵之宴」吸收进来）★
+            //   紧跟在指挥官（SpecialBatchPlan，负责写 _BATCH_MODE）之后：
+            //     · 当前种类 = farm → FarmDispatch 命中，按 farm 链导航（主城→活动→迷宫…）；
+            //     · 当前种类 = raid → RaidDispatch 命中，按 raid 链循环；
+            //     · 当前种类 = special（默认：入口 SpecialEntry 且清单为空）→ 两个都不命中，
+            //       继续走下面原有的 special 业务节点链，行为与合并前完全一致。
+            //   放在 special 业务节点【之前】是关键：farm/raid 模式下先被分派走，
+            //   绝不会误点 special 的「主城·领主战」导航。
+            "FarmDispatch",
+            "RaidDispatch",
+            // ★幻想连战分派器（把「自动刷幻想」吸收进来）★
+            //   当前种类 = phantom 时命中，随后走它 next 里的幻想状态机链（phantom.json）；
+            //   幻想的每个节点跑完都回 SpecialEntry，由指挥官再评估（切目标/收工），
+            //   形成「分派 → 幻想状态机 → 回分派」的循环。
+            //   phantom 模式下幻想刷到一半【绝不会】被指挥官切目标：指挥官只在
+            //   「已完成套数 == 目标套数」时（remaining==0）才切，见 side_impl._phantom_override。
+            "PhantomDispatch",
+            "SpecialBonusNo",
+            "SpecialBonusYes",
+            "SpecialAutoContinueSet",
+            "SpecialLeaveRoom",
+            "SpecialRecruitOpen",
+            "SpecialRecruitRandom",
+            "SpecialRecruitFans",
+            "SpecialRecruitMutual",
+            "SpecialStartRecruit",
+            "SpecialModeSolo",
+            "SpecialModeMulti",
+            "SpecialResultContinue",
+            "SpecialResultFallback",
+            "SpecialLevelUpContinue",
+            "SpecialTeamAutoSet",
+            "SpecialChallenge",
+            "SpecialFightTargetRow",
+            "SpecialFightNewRow",
+            "SpecialFullFirstFight",
+            "SpecialFullNoNew",
+            "SpecialFullStop",
+            "SpecialRoomFight",
+            "SpecialOpenLord",
+            "SpecialEnterBoss",
+            "SpecialTabLord",
+            "SpecialTabJoss",
+            "SpecialScrollList",
+            // ★#46★ GAMEOVER 页守卫 SpecialGameOverHold 排在 SpecialBattleWait 【之前】★
+            //   真机（维·索拉斯讨伐/超级 打输，127.0.0.1:16384）：GAMEOVER /「是否续关？」页
+            //   底部【仍然画着战斗 HUD 的「时间/分数」】→ SpecialBattleWait 的 And(时间,分数)
+            //   在这一页也命中。若由它「赢下」这一帧，它只会 DoNothing 并走自己的 next
+            //   （next 里没有 GAMEOVER 打断）→ [JumpBack]PubGameOver* 永远轮不到 → 调试日志
+            //   逐轮 `SpecialStallRecover Fail · PubGameOverConfirm Fail · SpecialBattleWait
+            //   Succeeded`，SpecialBattleWait ↔ SpecialEntry 空转到 1200s 超时。
+            //   本守卫只认『GAMEOVER』+「是否续关？」（不认 HUD），命中即 DoNothing 并把这一帧
+            //   交回 SpecialEntry，于是 GAMEOVER 页上【SpecialBattleWait 不再是命中者】。
+            //   （MAA 无 Not 识别，无法在 SpecialBattleWait 的 And 里写「且不是 GAMEOVER 页」，
+            //   故用分派优先级表达这条排他；离线求值器逐帧证明命中者不是 SpecialBattleWait。）
+            //   绝不点【续关】（星导石×50 是有限资源）——本守卫 DoNothing，绝不盲点。
+            "SpecialGameOverHold",
+            "SpecialBattleWait",
+            "[JumpBack]PubReturnHome",
+            "SpecialWait"
+        ]
+    },
+    "SpecialStallRecover": {
+        // 【卡死自恢复·需求 #3】画面连续 N 秒无变化 → 判定卡死 → 重开游戏拉回主城。
+        // 阈值复用 interface「无响应重开阈值」（默认 180s），不新造一套。
+        // 放在分派表很靠前（紧随公共换日弹窗），保证每轮都评估（详见 side_story.json 的 SideStallRecover）。
+        //
+        // ★恢复动作为什么用 restart_game（而不是 StopTask）★
+        //   特殊副本流程【有】主城导航（SpecialOpenLord 等），restart_game 把游戏拉回
+        //   主城后，pipeline 能自己重新导航到领主战继续，真正做到「恢复」而不是「收工」。
+        //   与安全红线「卡住优先 recover_game.py」一致（restart_game = 同一套强杀重开流程）。
+        // ★误报风险★：识别/等待节点不动画面；只有当加载页/战斗页真的静止超阈值
+        //   （游戏 hang）才会命中并重开，属预期兜底。正常流程画面在动，不会误触发。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stall_recover",
+                "custom_recognition_param": { "threshold_sec": 180 }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialBatchPlan": {
+        // 【批量副本清单·指挥官】agent 侧 custom_recognition "special_batch_plan"。
+        // 清单文本由 interface「要刷的副本清单」通过 custom_recognition_param.list 注入。
+        //   · box=None  → 不命中：清单为空（回退单目标）或当前目标正常推进中；
+        //   · box=[0,0,0,0] → 命中：执行下面的 action（点底部「主城」归位），
+        //     然后 next 决定「回 SpecialEntry 继续下一个」还是「走 SpecialBatchStop 收工」。
+        // 由识别器在运行时用 context.override_next 改写 next。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "special_batch_plan",
+                "custom_recognition_param": { "list": "" }
+            }
+        },
+        // 命中即点底部「主城」(实测 720 (179,1260))，两点式 target（铁律 3）。
+        // 归位后由 pipeline 自己重新导航到下一个副本，绝不使用返回键。
+        "action": { "type": "Click", "param": { "target": [179, 1260] } },
+        "post_delay": 2500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialBatchStop": {
+        // 【批量副本清单·收工】只在「清单全部完成 / 清单解析出错」时被
+        // SpecialBatchPlan 通过 override_next 指向，正常分派链里不出现。
+        // 前面 SpecialBatchPlan 的 action 已把游戏点回主城。
+        // ★#22★ 单目标模式（清单为空）也复用本节点收工：目标打满配置次数后，由
+        //   结算动作 special_batch_finish 在【结算帧】通过 override_next 把当前结算
+        //   节点指向本节点（见 agent/side_impl.py 的单目标收工闸；链上的显式收工边见
+        //   scene.chain.结算终点）。此前单目标打满后无任何东西指向本节点 → 只能在
+        //   主城 ↔ 列表 ↔ 详情 之间无限重进（#13 实证约 60 轮）。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": []
+    },
+    "PhantomDispatch": {
+        // 【幻想连战·种类分派器】只在当前种类 = phantom 时命中（BatchModeRecognition）。
+        // 命中后按下面的 next 走 phantom.json 的幻想状态机链（与原 PhantomEntry.next 一致）；
+        // 链上每个节点跑完都回 SpecialEntry，由指挥官（SpecialBatchPlan）再评估
+        // 「这一条幻想目标是否已刷够套数」，从而切下一条 / 收工。
+        //   · 单目标「自动刷幻想」：入口 PhantomEntry（别名→SpecialEntry）、清单为空，
+        //     种类由入口决定 = phantom → 本分派器命中，跑回与合并前完全一致的幻想法。
+        //   · 批量清单里写了一条「幻想连战,-,N」：指挥官把当前目标种类写成 phantom →
+        //     本分派器命中；刷够 N 套后 PhantomDone（batch 模式）回 SpecialEntry，
+        //     指挥官记完这条、切清单下一条。
+        // 非 phantom 模式下本节点不命中，SpecialEntry 继续走 special 业务节点链。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "batch_mode",
+                "custom_recognition_param": { "kind": "phantom" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            // 公共换日弹窗（common.json）：最临时的全局打断，放最前。
+            "PhantomLevelRequired",
+            "PhantomLevelRequiredNative",
+            "PhantomDone",
+            "PhantomGiveUp",
+            "PhantomStall",
+            "PhantomLoginContinue",
+            "PhantomTitleStart",
+            "PhantomLoading",
+            "PhantomRelogin",
+            "PhantomBattleWait",
+            "PhantomSettleContinueChallenge",
+            "PhantomSettleFallback",
+            // 公共 QUESTRESULT 快进（common.json）：原 PhantomQuestResult 已收敛到这里。
+            "PhantomMainFight",
+            "PhantomCountConfirm",
+            "PhantomSoloChallenge",
+            "PhantomCoopRecruit",
+            "PhantomRecruitStart",
+            "PhantomCoopChallenge",
+            "PhantomHubEnter",
+            "PhantomNavActivity",
+            "PhantomNavZhongshi",
+            "PhantomNavBanner",
+            "PhantomNavTab",
+            "PhantomConfirmContinue",
+            "[JumpBack]PubReturnHome",
+            "PhantomWait"
+        ]
+    },
+    "SpecialBonusNo": {
+        // 领主加成点数弹窗：点「否」。实测 720 (196,824)，与 farm 的 FarmBonusAnswer 同一弹窗。
+        // ★规格 A8 未定义「是否使用加成」选项，故默认固定点「否」。
+        //   若以后要支持「是」，把本节点 expected 关掉 / 改由选项覆盖即可（SpecialBonusYes 已就位）。
+        // 两点式 target。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["领主加成点数"] }
+        },
+        "action": { "type": "Click", "param": { "target": [196, 824] } },
+        "post_delay": 1500,
+        "next": [
+            "SpecialChallenge",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialBonusYes": {
+        // 领主加成点数弹窗：点「是」。实测 720 (522,823)。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["领主加成点数"] }
+        },
+        "action": { "type": "Click", "param": { "target": [522, 823] } },
+        "post_delay": 1500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialAutoContinueSet": {
+        // 房间页「自动续战」开关（实测 w3：标签 (533,115)，关 (545,157) / 开 (640,158)）。
+        // 这是分段开关：点「开」= 设开，点「关」= 设关，本身幂等；
+        // 但若不限次会每轮都命中、饿死后面的招募/战斗节点，故 max_hit:1（点一次就够）。
+        // 选项「是否自动续战」覆盖 action.target：是→[640,158]，否→[545,157]。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["自动续战"], "roi": [460, 80, 220, 110] }
+        },
+        "action": { "type": "Click", "param": { "target": [640, 158] } },
+        "max_hit": 1,
+        "post_delay": 1200,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialPartyText": {
+        // 仅作 SpecialLeaveRoom 的子识别：多人房间页左列的 Party 槽位标签。
+        // ROI 限定左列（x<220），避开其它页面偶发的 Party 字样。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["Party"], "roi": [0, 300, 220, 900] }
+        }
+    },
+    "SpecialRoomCopyText": {
+        // 仅作 SpecialLeaveRoom 的子识别：多人房间页每行右侧的「复制」(实测 x≈599，
+        // 用于复制房间号码；该行左侧还有「战力」数字，但那不是可靠判据)。
+        // ★踩过的坑★ 之前用「招募」当判据，但实测这一页【根本没有「招募」二字】
+        //   （OCR 把「复制」误读成「招募」，人眼确认无「招募」）→ LeaveRoom 永不命中。
+        // 「复制」在详情页/编队页/模式选择页都不出现，故 And(Party + 复制) 只在多人房间页成立。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["复制"], "roi": [430, 0, 290, 1300] }
+        }
+    },
+    "SpecialRoomPowerText": {
+        // 仅作 SpecialLeaveRoom 的子识别：多人房间页每行右侧的「战力」(实测 x≈549，行内 5 处)。
+        // ★为什么还要它★ 「请选择复制目标」这类编队子页也有 Party+复制，会误伤；
+        //   该子页没有「战力」，多人房间页三者俱全 → And(Party+复制+战力) 只命中房间页。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["战力"], "roi": [430, 0, 290, 1300] }
+        }
+    },
+    "SpecialLeaveRoom": {
+        // 【多人房间页兜底】点某档【战斗】偶尔会直接进多人房间（实测最高档出现过），
+        // 此时 mode 选择页的 SpecialModeSolo 来不及命中，pipeline 会空转超时。
+        // 本节点识别到「Party + 复制」的多人房间页 → 点该页【返回】(实测 720 (53,1259)) 退回详情页，
+        // 再由 SpecialFightNewRow/SpecialFullFirstFight 重新进档（实测重进能正常出 mode 选择页）。
+        // max_hit:5 防止「进房↔退房」死循环；超过 5 次就交给超时收尾，不会无限点。
+        // ★用屏幕上的返回按钮，绝不用 keyevent 4（安全红线）。
+        // 默认关闭（__NONE__）以保持「指定难度 + 多人」原行为（多人房间是那里的正常入口）；
+        // 由「单人还是多人=单人」或「打到哪一档=全部(打满)」覆盖成下面的 And 启用。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["__NONE__"] }
+        },
+        "action": { "type": "Click", "param": { "target": [53, 1259] } },
+        "max_hit": 5,
+        "post_delay": 2500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialRecruitOpen": {
+        // 房间页【招募】按钮（实测 w3 (388,828)）。点它打开招募方式页。
+        // 用 ^招募$ 精确匹配，避开「未进行招募」「招募方式」。max_hit:1 防止反复打开。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^招募$"], "roi": [300, 760, 300, 140] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "max_hit": 1,
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "SpecialRecruitRandom": {
+        // 招募方式：随机招募（实测 w4 (270,756)）。max_hit:1，选一次即可。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["随机招募"] }
+        },
+        "action": { "type": "Click", "param": { "target": [270, 756] } },
+        "max_hit": 1,
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialRecruitFans": {
+        // 招募方式：对关注者公开（实测 w4 (304,629)）。max_hit:1。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["对关注者公开"] }
+        },
+        "action": { "type": "Click", "param": { "target": [304, 629] } },
+        "max_hit": 1,
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialRecruitMutual": {
+        // 招募方式：对互相关注者公开（实测 w4 (336,502)）。max_hit:1。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["对互相关注者公开"] }
+        },
+        "action": { "type": "Click", "param": { "target": [336, 502] } },
+        "max_hit": 1,
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialStartRecruit": {
+        // 招募方式页【开始招募】（实测 w4 (522,919)）。排在招募方式节点之后。
+        // max_hit:1 防止开始招募后按钮仍在、被反复点。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["开始招募"] }
+        },
+        "action": { "type": "Click", "param": { "target": [522, 919] } },
+        "max_hit": 1,
+        "post_delay": 1500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialModeSolo": {
+        // 模式选择页【单人游戏】（实测 w1 (170,523)）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["单人游戏"] }
+        },
+        "action": { "type": "Click", "param": { "target": [170, 523] } },
+        "post_delay": 1500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialBonusNo",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialModeMulti": {
+        // 模式选择页【多人游戏/建立房间】（实测 w1 (392,929)）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["建立房间"] }
+        },
+        "action": { "type": "Click", "param": { "target": [392, 929] } },
+        "post_delay": 1500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialResultContinue": {
+        // 结算页【继续】/【OK】。排在结算兜底与升级结算之前。
+        // 注意：本节点排在 SpecialBattleWait 之前，判据严格（^继续$ / ^OK$），不会命中战斗 HUD。
+        //
+        // ★#22 单目标收工的落点★：本节点的动作是 custom「special_batch_finish」——
+        //   单目标模式（清单为空）下，当目标已打满配置次数（SpecialFightTargetRow 的
+        //   有限 max_hit 被命中计数用尽）时，该动作在【结算帧】把本节点的 next 覆盖成
+        //   ["SpecialBatchStop"]（链上的收工边见 scene.chain.结算终点）。于是打满后
+        //   明确收工，不再「归位 → 主城 → 重进同一目标」。缺省（max_hit 未设 = 不限次）
+        //   行为不变。
+        //
+        // ★判据已收敛到 common.PubResultContinueText（薄包装）★
+        //   · 为什么不用 [JumpBack]PubResultContinue：本节点动作是自定义「special_batch_finish」
+        //     （点识别框中心 + 批量模式记一场账本），公共叶子是纯 Click，不等价。
+        //   · ★节点名必须保留★：agent/side_impl.py 的 _BATCH_BUSY_NODES 用
+        //     context.run_recognition("SpecialResultContinue", ...) 判「画面还在结算」，
+        //     删除/改名会让批量指挥官误判「不忙」而提前切目标/收工。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubResultContinueText"] }
+        },
+        // ★结算动作换成 custom「special_batch_finish」★：行为与原 Click 一致（点识别框中心），
+        //   批量模式下在本局「开打→结算」的第一次结算推进时记一场账本。
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "special_batch_finish", "custom_action_param": {} }
+        },
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialResultFallback": {
+        // 结算页兜底推进：点识别到的 QUESTRESULT 横幅本身（顶部，远离底部按钮）。
+        // OCR 常把 QUESTRESULT 截断成 QUESTRE，故用子串 QUESTRE。
+        // ★判据已收敛到 common.PubQuestResultText（薄包装）；节点名必须保留
+        //   （同 SpecialResultContinue 的 _BATCH_BUSY_NODES 依赖）。动作仍是
+        //   custom「special_batch_finish」（点横幅 + 批量模式记一场），故不用 [JumpBack]。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubQuestResultText"] }
+        },
+        // 结算动作同样换成 custom「special_batch_finish」（点横幅 + 批量模式记一场）。
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "special_batch_finish", "custom_action_param": {} }
+        },
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialLevelUpContinue": {
+        // 战后升级结算页（等级提升/等级最大/经验值）：点底部继续（实测 720 (358,1198)）
+        // ★判据已收敛到 common.PubLevelUpText（薄包装）；节点名必须保留
+        //   （agent/side_impl.py 的 _BATCH_BUSY_NODES 依赖）。
+        //   动作为自定义 special_batch_finish（点继续 + 批量模式记一场），
+        //   与公共叶子 PubLevelUpContinue 的纯 Click 不等价，故不用 [JumpBack]。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubLevelUpText"] }
+        },
+        // 升级结算：custom「special_batch_finish」点固定「继续」(720 358,1198) + 批量模式记一场。
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "special_batch_finish",
+                "custom_action_param": { "target": [358, 1198] }
+            }
+        },
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    // ------------------------------------------------ 编队页「自动」（#56 二批 / ruling ②）
+    // ★跨模式硬规则★：「除了五重决战可以选择自动或手动以外，其他所有战斗都需要勾选自动」；
+    //   检查点从「战斗内(暂停→自动滑块)」**移到战斗外的编队页/房间页**，且「自动」按钮一律
+    //   **定位**（模板/OCR）后读状态、点识别框中心 —— **不同编队页位置不同**（编队页左下
+    //   (142,1062) / 共斗房间页右上 (630,102)），绝不写死坐标。本节点经 SpecialEntry 分派，
+    //   **覆盖所有模式**（领主战家族 / 幻想连战 / 战阵之宴 / 迷宫）的编队页。
+    //   条件门控（auto_switch_state, state=off）→ 只在当前是「关」时命中；命中设「开」后下一帧
+    //   不再命中（不进死循环），随后 SpecialChallenge 接管。
+    // ★三批根因修复（真机 127.0.0.1:16384 帧自证）★：旧门控是**全屏** ^自动$，**没有页面范围**，
+    //   于是它在**战斗/结算画面**上命中了**战斗 HUD 的「自动」**（OCR [15,193,55,19]；与编队页
+    //   底栏的「自动」[142,1062,43,26] 是**两个不同控件、不同位置**）→ 动作随后在**转场/加载帧**
+    //   上再截频 → 屏上无「自动」→ 旧的「定位不到 … → 不动」静默失败；若动作帧仍是战斗画面，
+    //   则点到战斗 HUD 中心（≈(42,202)）→「点后仍未达期望」。两种形态同根：门控未限定页面。
+    //   现由 auto_switch_state 强制**编队页/房间页**判据（页面文本锚点 ∨ 开关探针内的 开/关 状态字，
+    //   均不含坐标），战斗 HUD 的「自动」永不命中；定位不到改为**可见失败**（[auto_switch][FAIL]）。
+    //   证据帧：tools/frames/auto_battle_hud_hit.png（战斗命中帧）+ auto_battle_hud_action.png（加载失败帧）。
+    "SpecialTeamAutoSet": {
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "auto_switch_state",
+                "custom_recognition_param": { "label": "自动", "state": "off", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "auto_switch",
+                "custom_action_param": { "on": true, "scene": "special", "label": "自动", "click_action": "PubClick" }
+            }
+        },
+        "post_delay": 800,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialChallenge": {
+        // 编队页【挑战】。ROI 限定在屏幕底部，避开房间页中部那个灰掉的「挑战」(实测 w3 (339,919))，
+        // 只匹配编队页底部真正的挑战按钮（实测 720 (337,1076)）。
+        // ★#109★ 这个按钮有**两种渲染**：`挑战` 与 `挑战→`（带箭头，真机帧 `debug/wc_a_set1_back.png`
+        //   可见；识别调研统计 8/17 帧带箭头）。整串 `^挑战$` 会漏掉一半帧，故兼容箭头 `(→)?`。
+        //   ★判据仍两端锚定★：绝不写裸「挑战」，否则会命中「再次挑战 / 继续挑战 / 挑战深渊连战」。
+        //   ★单一真源★：scene/page_rules.py 的「编队页」判据**抄自本节点**（scene.drift 一个字节都不放过）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^挑战(→)?$"], "roi": [180, 1000, 400, 180] }
+        },
+        // ★开打动作换成 custom「special_batch_fight」★：行为与原 Click 完全一致
+        //   （点识别框中心），但在「批量清单」激活时会额外往账本记「本目标第 N 次开打」。
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "special_batch_fight", "custom_action_param": {} }
+        },
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialBattleWait",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialFightTargetRow": {
+        // 详情页【目标难度行】→ 点该行的【战斗】。
+        // ★P0 安全修复★：不再用「难度标题 + 死偏移猜战斗位置」（那会因标题框低几像素
+        //   而落进只差 36px 的【推荐编成】，从而改掉用户队伍配置）。
+        //   现在由 agent 的 custom「special_target_fight」直接返回【战斗】按钮自己的
+        //   OCR 框：用难度名只判断「哪一行」，点击点 = 战斗框中心，零偏移。
+        //   ⇒ 点击必然落在【战斗】框内，绝不落进【推荐编成】（离线断言已证明）。
+        // difficulty 由选项「打哪个难度」覆盖（高级$ / 中级$ / 超级$ / 高级\+$ / 初级$）；
+        //   ★必须带 $ 锚定★：不加 $ 时「高级」会误命中「高级+」。
+        // 「打满」模式把 difficulty 覆盖成 "__NONE__" 关掉本节点。
+        // ★#35 真机几何★：详情页每行是【难度名在上、战斗在其下方 ≈40px、且更靠左】
+        //   （实测 妖狐超级 y=456 → 战斗 y=501；诅咒弧魔艾基尔中级 y=458 → 战斗 y=498）。
+        //   pair="below" 按此配对：单难度行成员不再卡死、多难度行成员不再点到上一行的战斗。
+        // ★#41 门控（不挪分派顺序的原因）★：本节点的「难度发现」（custom
+        //   special_target_fight → classify_detail_difficulty）只在【详情页】上评估 ——
+        //   判据是详情页独有标记「推荐编成」（= pipeline SpecialDetailGate，同源）。
+        //   主城帧即使横幅被 OCR 误读成难度词（地狱级/超级）也判 not_applicable、绝不跳过；
+        //   故本节点排在 SpecialOpenLord（主城导航）之前是安全的，无需改分派顺序。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "special_target_fight",
+                "custom_recognition_param": { "difficulty": "高级$", "pair": "below" }
+            }
+        },
+        "action": {
+            "type": "Click",
+            "param": { "target": true }
+        },
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialModeSolo",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialDetailGate": {
+        // 仅作 SpecialFightNewRow 的子识别：详情页独有元素「推荐编成」。
+        // 列表页没有「推荐编成」，用它把 NEW 行的点击限制在【详情页】内
+        // （列表页也有 NEW 徽标，直接认 NEW 会误点列表行）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["推荐编成"] }
+        }
+    },
+    "SpecialNewBadge": {
+        // 仅作 SpecialFightNewRow 的子识别：详情页 NEW 徽标（左侧角标列）
+        // ★#102 P0-3★ 双通道：模板优先、OCR 兜底（Or 是「命中第一个即成功」，顺序即优先级）。
+        //   · 模板叶 SpecialNewBadgeTpl：common/badge_new.png，小行徽标 720 (14,388,52,21)，
+        //     跨帧正例 4 帧灰分 0.9976 / 0.9475 / 0.9375 / 0.9271，负例最高 0.7615（余量 0.0885）；
+        //   · OCR 叶 SpecialNewBadgeOcr：**原判据一个字节都没改**（^NEW$ + 同 roi）——
+        //     模板漏检时仍有它兜底，禁止把双通道删成一条（hooks_102 会红）。
+        //   · 大 NEW 徽标（PubNewCharText）与列表行两处仍是 OCR：尺寸/位置不同，不是同一张裁片。
+        "recognition": {
+            "type": "Or",
+            "param": { "any_of": ["SpecialNewBadgeTpl", "SpecialNewBadgeOcr"] }
+        }
+    },
+    "SpecialNewBadgeTpl": {
+        // 仅作 SpecialNewBadge 的模板通道：NEW 徽标本体（粉字 + 深红描边，不裁行底色）。
+        // threshold 0.85：负例最高 0.7615（side_story_list 的横幅装饰）→ 余量 0.0885；
+        // order_by Score 显式写死（默认 Horizontal + index 0 = 取最左，与「最像」无关）。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": ["common/badge_new.png"],
+                "threshold": 0.85,
+                "roi": [0, 380, 120, 600],
+                "order_by": "Score"
+            }
+        }
+    },
+    "SpecialNewBadgeOcr": {
+        // 仅作 SpecialNewBadge 的 OCR 兜底：原判据原样搬过来（expected + roi 均未改）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^NEW$"], "roi": [0, 380, 120, 600] }
+        }
+    },
+    "SpecialBattleBtn": {
+        // 详情页每行的【战斗】按钮（直接 OCR「^战斗$」本身，不再猜偏移）。
+        // ROI 限定在详情页各难度行所在区域（实测战斗按钮 720 y≈508/699/890/1082，
+        //   x 中心≈103），避开列表页顶部横幅「- 战斗 -」(y≈206)。
+        // ★order_by Vertical + index 0★：按纵向取最上面那个战斗按钮 —— 未通关的
+        //   NEW 行永远排在最上面（实测：通关中级后页面顶部是 高级/NEW 行）。
+        // 只作为 SpecialFightNewRow / SpecialFullFirstFight 的子识别（box_index 指向它），
+        // 不单独进分派链。
+        "recognition": {
+            "type": "OCR",
+            "param": {
+                "expected": ["^战斗$"],
+                "roi": [0, 380, 340, 800],
+                "order_by": "Vertical",
+                "index": 0
+            }
+        }
+    },
+    "SpecialFightNewRow": {
+        // 详情页【NEW 行】→ 点其【战斗】（用于「尝试开启所有前置」：打当前解锁档以解锁上一档）。
+        // ★P0 安全修复★：And(详情页 + 有 NEW 徽标 + 最上面的【战斗】按钮)，
+        //   box_index=2 让点击目标 = SpecialBattleBtn 自己 OCR 出来的【战斗】框（零偏移）。
+        //   绝不再用 NEW 徽标 + (+60,+110) 死偏移（那会因徽标框抖动而落到【推荐编成】）。
+        // 三个条件同时成立才点：既保证在详情页、又保证确实还有未通关(NEW)的行。
+        // 选项「尝试开启所有前置=否」时把 SpecialNewBadge 覆盖成 __NONE__ 关闭本节点。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["SpecialDetailGate", "SpecialNewBadge", "SpecialBattleBtn"],
+                "box_index": 2
+            }
+        },
+        "action": {
+            "type": "Click",
+            "param": { "target": true }
+        },
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialFirstReward": {
+        // 仅作 SpecialFullFirstFight 的子识别：详情页行上的「首次报酬」。
+        // ★实测★ 只有【未通关】的难度行才有「首次报酬」；4 档全 COMPLETE 后整页都没有它。
+        // 详情页的「首次报酬」在行右上（实测 720 (583,444)），行内【战斗】在 (101,509)。
+        // 结算页也有「首次报酬」字样，故调用方必须用 SpecialDetailGate(推荐编成) 把命中限制在详情页。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["首次报酬"] }
+        }
+    },
+    "SpecialFullFirstFight": {
+        // 【打满模式·首发档兜底】新副本的第一个可打难度【没有 NEW 徽标】（只有首次报酬），
+        //   光靠 SpecialFightNewRow 会打不着它 → 必须靠本节点开打第一档。
+        // ★P0 安全修复★：用 And(详情页 + 有首次报酬 + 最上面的【战斗】按钮)，
+        //   box_index=2 让点击目标 = SpecialBattleBtn 的【战斗】OCR 框（零偏移）。
+        //   绝不再用「首次报酬 + (-482,+65)」死偏移（首次报酬 y 略低就会落到【推荐编成】）。
+        // 排在 SpecialFightNewRow 之后：有 NEW 行时优先打 NEW（规格要求）；
+        //   没有 NEW 行但仍有首次报酬（=还有没通关的档）时，由本节点继续打。
+        // 默认关闭（__NONE__）；「打到哪一档=全部(打满)」时覆盖成上面的 And 启用。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["__NONE__"] }
+        },
+        "action": {
+            "type": "Click",
+            "param": { "target": true }
+        },
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialFullNoNew": {
+        // 【打满模式·防死循环计数】排在 SpecialFightNewRow 之后：
+        //   只有「详情页 + SpecialFightNewRow 未命中（即认不出 NEW 行）」时才会走到本节点。
+        //   命中一次 = 本轮在详情页没找到 NEW 行；max_hit:3 = 连续 3 次找不到就放行给 SpecialFullStop。
+        // 默认（指定难度模式）用 __NONE__ 关闭；选项「打到哪一档=全部(打满)」时覆盖为「推荐编成」启用。
+        // 注意：max_hit 是本次任务内的累计计数（任务重开即清零），clear_all.py 每个副本单开一个任务重置。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["__NONE__"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "max_hit": 3,
+        "post_delay": 1500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialFullStop": {
+        // 【打满模式·收工】SpecialFullNoNew 连续命中 3 次（被 max_hit 跳过）后才会轮到这里。
+        //   此时详情页已无任何 NEW 行（全变 COMPLETE!!）→ StopTask 收工，绝不空转。
+        // 默认关闭（__NONE__）；「打到哪一档=全部(打满)」时覆盖为「推荐编成」启用。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["__NONE__"] }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialRoomFight": {
+        // 房间页底部【战斗】。实测 w3 在 (104,1133)，故 ROI 限定屏幕最下方，
+        // 避开详情页行内「战斗」(y≈509/699/891) 和列表页横幅「战斗」(y≈206)。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^战斗$"], "roi": [0, 1050, 720, 180] }
+        },
+        // ★多人「开打」动作同样换成 custom「special_batch_fight」★（点识别框中心 +
+        //   批量模式下记一笔账本）。保持在 room 页最下方的 ROI，避开发详情页的行内战斗。
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "special_batch_fight", "custom_action_param": {} }
+        },
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialEnterBoss": {
+        // 列表页【目标副本行】→ 点行名进详情。
+        // expected 由选项「打哪个副本」覆盖为具体副本名（实测如「猩红巨熊讨伐」）。
+        // 默认给一个可用的领主战名，验证/裸跑用。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["猩红巨熊讨伐"], "roi": [150, 440, 320, 800] }
+        },
+        // ★#42★ 选行动作改为 custom「special_batch_fight」的 row_click 分支：
+        //   点击前【立刻重抓一帧】并在列表体内复核目标行 —— 还认得到就用【新框】点击
+        //   （两次框的纵向位移写进日志 = 竞态证据），认不到就**不点**。
+        //   绝不按陈旧坐标点别人的行（真机 r9 就是这么打开了「碧之女王」的详情页、
+        //   还被账本记成「伊劳德雷斯」——静默错误结果，比卡死更糟）。
+        //   ★为什么复用这个动作名★：#20 把 runner 侧注册表锁死在 live_harness（本泳道不可改），
+        //   新增自定义名会让套件变红；故用显式参数 row_click 区分语义（守卫见 hooks_42）。
+        //   打开详情页后还有第二道闸：详情页身份校验（agent/side_impl.detail_page_identity，
+        //   由 SpecialFightTargetRow 的 special_target_fight 执行）——不匹配绝不开打。
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "special_batch_fight",
+                "custom_action_param": { "row_click": true }
+            }
+        },
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialFightTargetRow",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialScrollList": {
+        // 列表页没找到目标副本时滚动继续找。
+        // 判据用列表页独有的固定元素「更新列表」(实测 656,342)，详情页没有。
+        // ★踩过的坑★ 原先一步 433px / 400ms（=滑动手势 540,1500→540,850）是「甩动」，
+        //   实测一下跨 ~4 行，会直接跳过目标；滚到底后继续甩还会把页面甩到别的页
+        //   （本轮 白虎讨伐 就这样被跳过，最后漂到扭蛋页空转到超时）。
+        // 现改为 400px / 500ms 的受控滚动（实测 pipeline 每次约 2~3 行），并加 max_hit 防止无限滚。
+        // 手型落在列表中部 (y 800~1200)，避开底部导航与顶部固定条。
+        // ★#36 修正★ 上面那句「避开底部导航」是错的：起点 y=1200 恰恰【落在】底部导航带
+        //   ROI [0,1180,720,100] 之内（真机列表体止于 ~1180；底导六槽标签在 y≈1245~1272）。
+        //   后果（真机实证 + 失败帧）：需要多次滚动才能到达的【深行目标】，手势从底导控件
+        //   上起手 → 列表不吃这一笔（画面不滚）→ 手指抬起处（y≈800 的那一行）被当成【选行】
+        //   → 打开【别人的】详情页 → 链无法恢复（SpecialEnterBoss 要目标名、
+        //   SpecialScrollList 要「更新列表」，而详情页两样都没有 → 只剩 DirectHit 的
+        //   SpecialWait / SpecialEntry 互跳）→ 空转到超时。行越深越易触发
+        //   （行 6/8 可过；行 9/12/15 失败；失败帧全停在 Sec-5200Li 讨伐的详情页上）。
+        //   这是 #29「归位抢跑」的【同族病】：手势作用在了【导航控件】上，只是换成了 Swipe。
+        // 现改为【起点与终点都落在列表体内】：真机列表体 ≈ y ∈ [440, 1180]
+        //   （上沿是固定条：活动栏 y≈302、页签行 y≈388~421；下沿是底导带 1180）。
+        //   起点 1040、终点 640：中点 840 ≈ 列表体竖直中点 810，行程仍 400px
+        //   （受控滚动，每次约 2~3 行 —— 与上面「现改为 400px / 500ms」一致）。
+        //   起点离底导带上沿 1180 还有 140px（≈1 行高）余量，绝不触及底导 / 左下「返回」槽。
+        //   几何守卫见 tools/contract_hooks/hooks_36.py（断言两端点都落在底导 / 返回 ROI 之外；
+        //   破坏实验：把起点退回 y=1200 → 守卫变红）。
+        // max_hit 给 30：15 行列表在 420s 内足够滚到最底部（维·索拉斯/不死王 在最后两行）。
+        // ★#50 修正上面这句的【语义】★：这个 30 不是「整个任务共享的滚动预算」，而是
+        //   【每个条目的滚动预算】。框架的命中计数是**按任务**累计的（任务重开才清零），
+        //   而一个批量 chunk（如「5 个深行成员的降临讨伐」）= 一个任务 →
+        //   原形态下 5 个成员**共用一个 30**：用尽后本节点被框架静默跳过
+        //   （原生日志 `max_hit reached [data.name=SpecialScrollList] [current_hit=30]
+        //   [data.max_hit=30]`）→ 目标行永远滚不到 → 只剩 SpecialEntry / SpecialTabJoss
+        //   互跳 → 空转到超时；而单个成员的 fresh task 里整份预算都归它，故同一个深行
+        //   目标「找得到」。
+        //   现由指挥官在**每个条目开始导航前**把命中上限抬到「当前命中数 + 一份预算」
+        //   （agent/side_impl._ensure_scroll_budget / restored_scroll_max_hit），等价于
+        //   「每条目重置」；单条目滚动不超过一份预算 → 总量仍有界（条目数 × 预算）、
+        //   绝不无限滚。单源常量 = side_impl._PER_ITEM_SCROLL_BUDGET（守卫 hooks_50
+        //   与这里的 max_hit 逐字段绑定）。
+        // ★#50 有界停止（安全网）★：单条目把一份预算滚完仍未把目标行滚进屏幕（目标行
+        //   不在列表里 / 一直滚错页）→ 指挥官明确【跳过该目标并记录原因】，绝不静默空转、
+        //   绝不假记账（判定 = side_impl.scroll_budget_exhausted）。
+        //   ★为什么这正是「行一旦可见就不再消耗预算」的证据★：SpecialEnterBoss 排在
+        //   SpecialScrollList 之前（见 SpecialTabLord/SpecialTabJoss 的 next），行一旦进屏
+        //   就被选行、不再走滚动节点 → 预算被滚完只可能是「行始终没进屏」。
+        // ★#50 数值上调 30 → 80（每条目）★：上面那条「给 30 就够」的注释是给 15 行【领主战】
+        //   列表写的；【降临讨伐】列表比它长/深得多。真机 16448 实测（5 个深行成员一个 chunk）：
+        //   成员 3/4 分别要 ~15/~23 次滚动（成员 4 起步时命中数已 20 → 旧的共享 30 只够再滚 10，
+        //   必被静默跳过），成员 5 连 30 次都没滚到 → 30 会把最深行误判成「不可达」。
+        //   故把每条目预算抬到 80（有界：单条目最多 80 次；够滚完 29 行且有余量）。
+        //   守卫 + 离线复现 + prove-red 见 tools/contract_hooks/hooks_50.py。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["更新列表"] }
+        },
+        "action": {
+            "type": "Swipe",
+            "param": {
+                // ★四元素陷阱修复★ begin/end 必须写成【两元素定点 [x, y]】。
+                //   MAA 的四元素形态 [x, y, w, h] 是【区域】——会在矩形内随机取一点
+                //   （越靠中心概率越高）；w/h=0 时该区域【延伸到屏幕边缘】（即 [0,0,0,0]
+                //   就是全屏，见 deps/tools/pipeline.schema.json 的 Swipe.begin 说明）。
+                //   所以旧写法 [360, 1040, 0, 0] → [360, 640, 0, 0] 实际是
+                //   [360,720]×[1040,1280] → [360,720]×[640,1280] 的【随机斜向拖拽】：
+                //   起点/终点 x 各在 [360,720] 内乱跳（真机日志实证：begin x∈[362,710]、
+                //   end x∈[360,714]，dx 常数百像素）。这正是运维看到的
+                //   「斜向拉动 + 左右拉去找」。两元素定点则 dx≡0，严格竖直。
+                "begin": [360, 1040],
+                "end": [360, 640],
+                "duration": 800
+            }
+        },
+        "max_hit": 80,
+        // ★#42★ 滑动后的稳定等待：受控滚动 400px 之后列表还会带一点惯性，而随后的
+        //   选行点击发生在「识别那一帧之后」——给它更长的稳定时间，把「列表仍在滑动时点行」
+        //   的窗口压到最小（选行点击自身还会复核一次，双保险；1600 → 2600）。
+        //   真机 r9 的错位正是【深行多次滑动】之后紧接着发生的（此时惯性最容易咬人）。
+        // ★#42 真机实证（机型A/RANK158）★：降临讨伐列表比领主战长得多（目标行要滑 6+ 次），
+        //   期间**出现过『没有经过选行节点、却打开了某个行的详情页』**（帧内那几行是列表
+        //   中段的 暗凛机兵 / 闪哭机兵）—— 最可能是 500ms/400px 的「甩动」在抬手时被当成
+        //   一次【点行】。故把手势放慢成 800ms（同 400px 行程 = 明确的拖拽而不是甩动），
+        //   把「抬手被读成点击」的概率压下去（这一条是**缓解**，不是已证实的修复；
+        //   真正的兜底是选行复核 + 详情页身份校验：错页会被拒绝并退回重导航）。
+        "post_delay": 2600,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialOpenLord": {
+        // 主城【领主战】入口（实测 (608,1135)）。ROI 限定右下角，避开列表页/详情页的「领主战」文字。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["领主战"], "roi": [480, 1080, 240, 140] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 2500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialTabLord",
+            "SpecialTabJoss",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialTabLord": {
+        // 列表页顶部 tab【领主战】(实测 (180,405))。ROI 限于 tab 行，避开列表行里的分类「领主战」。
+        // max_hit:1 —— 切一次 tab 即可；不限次会每轮都命中、饿死后面的滚动找副本。
+        // 选降临讨伐副本时由选项把本节点 expected 覆盖成 __NONE__（因为「领主战」tab 标签常驻，
+        // 不关掉它就会先切回领主战 tab）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^领主战$"], "roi": [0, 375, 360, 60] }
+        },
+        "action": { "type": "Click", "param": { "target": [180, 405] } },
+        // ★#19★ 已移除 max_hit:1 —— 页签必须由【目标子族】决定，绝不靠「谁先命中谁用尽次数」竞速。
+        //   本节点是【领主战】目标要走的页签（领主战 tab 标签常驻 → 排在 SpecialTabJoss 之前 → 先命中）。
+        //   ★重进列表必须重新确认同一页签★：不限次 = 每次回到列表都重新点回领主战 tab，
+        //   绝不会因「次数用尽」把页签让给 SpecialTabJoss。
+        //   死循环实证（#13 15:21:57 结算后）：首轮用掉唯一一次命中 → 此后每次重进 SpecialTabJoss
+        //   抢先 → 列表翻到降临讨伐 → 目标行「八岐大蛇讨伐」不可见 → SpecialEnterBoss 永不命中 →
+        //   后缀归位 → 主城 → SpecialOpenLord 重开 → 循环（~4.3s）直到 stall。页签由子族决定后此环消失。
+        "post_delay": 1200,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialEnterBoss",
+            // ★#29★ 目标行不在首屏时必须先去【滚动找行】，而不是被兜底归位抢跑。
+            //   页签已选中后，若「选目标行」(SpecialEnterBoss) 不命中（目标在屏幕外），
+            //   就滚列表（SpecialScrollList）继续找；归位已收紧为「不在主城分区」才命中，
+            //   故此处不再被它 hijack（否则 15 行只有首屏 3 行能打，其余循环到超时）。
+            "SpecialScrollList",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialTabJoss": {
+        // 列表页顶部 tab【降临讨伐】(实测 (540,404))。ROI 限于 tab 行。max_hit:1。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["降临讨伐"], "roi": [360, 375, 360, 60] }
+        },
+        "action": { "type": "Click", "param": { "target": [540, 404] } },
+        // ★#19★ 已移除 max_hit:1 —— 同 SpecialTabLord：页签由目标子族决定，重复进入列表必须
+        //   重新确认同一页签（降临讨伐目标 = 本节点），绝不因次数用尽而空转 / 翻回领主战。
+        //   降临讨伐目标时 SpecialTabLord 被选项覆盖成 __NONE__（见 scene.lord_battle 的子族覆盖），
+        //   故本节点是该子族唯一的页签节点；领主战目标则被 SpecialTabLord 抢先，本节点永不触达。
+        "post_delay": 1200,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialEnterBoss",
+            // ★#29★ 目标行不在首屏时必须先去【滚动找行】，而不是被兜底归位抢跑。
+            //   页签已选中后，若「选目标行」(SpecialEnterBoss) 不命中（目标在屏幕外），
+            //   就滚列表（SpecialScrollList）继续找；归位已收紧为「不在主城分区」才命中，
+            //   故此处不再被它 hijack（否则 15 行只有首屏 3 行能打，其余循环到超时）。
+            "SpecialScrollList",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialGameOverHold": {
+        // ★#46★ GAMEOVER /「是否续关？」页守卫（只认页面锚点，绝不点任何按钮）★
+        //   判据 = And(『GAMEOVER』横幅, 「是否续关？」) —— 与 #38 的 PubGameOverGiveUpFallback
+        //   同一组页面锚点（common.json），但**没有 max_hit**：它是「这一帧是失败页」的
+        //   永久前置捕获，绝不因点击次数用尽而消失（GiveUp/GiveUpFallback 的 max_hit=10 用尽
+        //   后正是 SpecialBattleWait 顶上来的窗口，见 SpecialEntry.next 的 #46 注释）。
+        //   动作 DoNothing：真正的『放弃』/『OK』点击仍由 [JumpBack]PubGameOver*（#38）读屏执行，
+        //   绝不盲点、绝不点【续关】（星导石×50 是有限资源）。
+        //   next 末位是恢复边 SpecialEntry（依赖事件层注入前缀/后缀，见 #18 规范形）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubGameOverTitle", "PubGameOverPrompt"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialBattleWait": {
+        // 战斗中：判据收敛到 common.json 的 PubBattleTime/PubBattleScore
+        // （And：时间 \d+:\d+ + 分数 \d，见铁律 4）。
+        // ★绝不改回裸「时间」「分数」：结算页「战斗分数」「最长滞空时间6秒」会误命中 → 空等死循环★
+        // post_delay 与分派位置沿用本文件实测值（3000；必须排在分派链倒数第二，仅高于 SpecialWait）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubBattleTime", "PubBattleScore"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "SpecialResultContinue",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    },
+    "SpecialWait": {
+        // 兜底等待：认不出的画面只等待，绝不盲目点击
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 1500,
+        "next": [
+            "[JumpBack]PubLoadingWait",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]PubLevelUpContinue",
+            "[JumpBack]PubNewCharTap",
+            "[JumpBack]PubSkipStory",
+            "[JumpBack]PubChallenge",
+            "[JumpBack]SpecialBonusNo",
+            "[JumpBack]SpecialRecruitOpen",
+            "[JumpBack]PubReturnHome",
+            "SpecialEntry"
+        ]
+    }
+}
