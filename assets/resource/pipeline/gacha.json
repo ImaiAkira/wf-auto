@@ -1,0 +1,167 @@
+{
+    // 扭蛋（抽卡）
+    // 入口：GachaEntry
+    //
+    // ============ 实测流程（16384，1080x1920）============
+    //   池子页: [10连抽取] -> 若特选券不足，弹「现有对应特选扭蛋券数量不足 /
+    //            是否消耗免费星导石 × 1500 进行购买？」-> [购买并抽取]
+    //          -> 逐张揭示（右上角 [全部跳过]）
+    //          -> 结果汇总页 -> [继续 10连抽取] 可直接连抽下一发
+    //   实测一次 10 连 = 1500 免费星导石（290,065 -> 288,565 核对过）
+    //
+    // ============ 池子（实测左->右顺序）============
+    //   深渊限定扭蛋 ⛔ | 深渊竞速池 ⛔ | 流星节扭蛋限定 | 火属性特选扭蛋
+    //   | 冰属性特选扭蛋 | 雷属性特选扭蛋 | 风属性特选扭蛋 | 暗属性特选扭蛋
+    //   | 光属性特选扭蛋 | 装备扭蛋
+    //   切池方式：点标签卡带左右两侧的卡（点侧卡 = 把那张切到中间）
+    //
+    // ============ 安全设计 ============
+    //   1) GachaForbidden 用 StopTask 硬终止：只要当前显示的是深渊两个池，
+    //      立刻结束任务，绝不抽取。它是硬保险（排在公共换日弹窗之后、其余节点之前）。
+    //   2) GachaDraw10 必须【同时】满足「抽哪个池」选项指定的池子名 + 「10连抽取」按钮，
+    //      所以万一池子没切对，它不会抽（宁可不动，也不抽错池）。
+    //   3) 池子名的识别限定在【中间那张横幅】的 roi 内，避免被左右两张侧卡的文字误判。
+    // ================================
+    "GachaEntry": {
+        "next": [
+            // 公共换日弹窗（common.json）：最临时的全局打断，放最前。
+            // 它只在 ^日期变了$ + ^OK$ 同时命中时才动，不会误命中深渊池判据；
+            // 点掉系统弹窗后会重扫，GachaForbidden 硬保险仍会照常生效。
+            "[JumpBack]PubDailyPopup",
+            "GachaForbidden",
+            // 公共账号页/标题页推进（common.json）：原地替换原 GachaLoginContinue/GachaTitleStart。
+            // ★等价性★：二者原 next=["GachaEntry"]（调用者即 GachaEntry）→ [JumpBack] 等价。
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            // 公共加载等待（common.json）：纯等待不点击；沿用原 GachaLoadingWait 的位置。
+            "[JumpBack]PubLoadingWait",
+            "GachaBuyConfirm",
+            "GachaClosePopup",
+            // 公共新角色画面（common.json）：原地替换原 GachaNewCharTap。
+            // ★等价性★：原 next=["GachaEntry"]（调用者即 GachaEntry）→ [JumpBack] 等价。
+            "[JumpBack]PubNewCharTap",
+            "GachaSkipAll",
+            "GachaContinue10",
+            "GachaDraw10",
+            "GachaWait"
+        ]
+    },
+    "GachaForbidden": {
+        // 【硬保险】当前池是禁止抽取的两个深渊池 -> 立即终止任务
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["深渊限定扭蛋", "深渊竞速池"] }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "next": []
+    },
+    "GachaBuyConfirm": {
+        // 特选券不足时的购买确认框 -> 点「购买并抽取」（绝不点「取消」）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^购买并抽取$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["GachaEntry"]
+    },
+    "GachaClosePopup": {
+        // 「共计转换经验值 / 已将共计 N 个角色转换为经验值！」等弹窗 -> 点「关闭」
+        // （实测跑完多次 10 连后会出现，漏处理会卡住）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^关闭$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["GachaEntry"]
+    },
+    "GachaSkipAll": {
+        // 结果揭示页右上角的「全部跳过」。
+        //
+        // 【怎么看出来的】实机看画面：按钮是两行「全部 / 跳过」+ 一个 ">" 箭头，
+        // 位于原始约 x960-1080 / y185-280，中心 (1020,232) -> 720 空间 (680,155)。
+        //
+        // 【为什么要固定坐标】之前只识别「跳过」子串、用识别框做点击目标，
+        // 结果点不中按钮 —— 而且【出现★4以上角色时揭示会暂停等待点击】，
+        // 点不中就一直卡在「结果 1/10」（用户实测反馈"只会点跳过"就是这个）。
+        // 注意 target 必须写 [x, y] 两点式；写 [x, y, 0, 0] 会因零尺寸矩形导致
+        // 动作失败、整个任务 FAILED。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["跳过"], "roi": [480, 40, 240, 170] }
+        },
+        "action": {
+            "type": "Click",
+            "param": { "target": [680, 155] }
+        },
+        "post_delay": 1500,
+        "next": ["GachaEntry"]
+    },
+    "GachaDraw10Btn": {
+        // 仅作 GachaDraw10 / GachaContinue10 的子识别：「10连抽取」按钮
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["10连抽取"] }
+        }
+    },
+    "GachaPoolCheck": {
+        // 仅作 GachaDraw10 的子识别：当前【中间横幅】显示的池子名。
+        // expected 由 ProjectInterface 的「抽哪个池」选项覆盖。
+        // roi 限定在中间那张横幅上（约 原始 x290-780, y150-330 -> 720 空间 [193,100,330,153]），
+        // 否则左右两张侧卡的文字也会被读到、造成误判。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["火属性"], "roi": [193, 100, 330, 153] }
+        }
+    },
+    "GachaDraw10": {
+        // 池子页抽 10 连：必须【同时】满足「池子名匹配」和「10连抽取」才点。
+        //
+        // 【重要】点击目标不能依赖 And 的 box_index（实测它没有把点击位置切到按钮上，
+        // 结果每 2 秒点一次池子名横幅、抽不了卡）。这里直接用固定坐标。
+        // 坐标按【原始分辨率 1080x1920】填（实测 adb 点 (857,1522) 能弹出购买框）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["GachaPoolCheck", "GachaDraw10Btn"],
+                "box_index": 1
+            }
+        },
+        "action": {
+            "type": "Click",
+            "param": { "target": [571, 1015] }
+        },
+        "post_delay": 2500,
+        "next": ["GachaEntry"]
+    },
+    "GachaContinueBtn": {
+        // 仅作 GachaContinue10 的子识别：结果汇总页的「继续」
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^继续$"] }
+        }
+    },
+    "GachaContinue10": {
+        // 结果汇总页：点「继续 10连抽取」直接连抽下一发。
+        // max_hit 由 ProjectInterface 的「抽几次」选项覆盖。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["GachaContinueBtn", "GachaDraw10Btn"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "max_hit": 10,
+        "post_delay": 2500,
+        "next": ["GachaEntry"]
+    },
+    "GachaWait": {
+        // 兜底：只等待，绝不点击
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 1500,
+        "next": ["GachaEntry"]
+    }
+}

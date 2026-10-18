@@ -1,0 +1,20 @@
+﻿resource load: True
+entry=OcrTask succeeded=True
+hit: True
+  OCRResult(box=[22, 52, 42, 41], score=0.537316, text='11')
+  OCRResult(box=[35, 1222, 133, 39], score=0.996556, text='时间 30:00')
+  OCRResult(box=[100, 213, 85, 23], score=0.999859, text='解除条件')
+  OCRResult(box=[101, 173, 180, 28], score=0.972708, text='30连击抑制效果')
+  OCRResult(box=[177, 213, 111, 19], score=0.9976, text='10次强化弹射')
+  OCRResult(box=[193, 1222, 241, 38], score=0.990205, text='分数 00000000000')
+  OCRResult(box=[194, 364, 17, 24], score=0.276095, text='占')
+  OCRResult(box=[214, 25, 79, 29], score=0.999264, text='100%')
+  OCRResult(box=[258, 104, 121, 34], score=0.536906, text='NONO')
+  OCRResult(box=[272, 784, 172, 42], score=0.92274, text='FEYER')
+  OCRResult(box=[284, 964, 146, 81], score=0.999976, text='点击')
+  OCRResult(box=[317, 157, 90, 24], score=0.999862, text='深渊不死王')
+  OCRResult(box=[373, 56, 39, 36], score=0.681874, text='因')
+  OCRResult(box=[419, 29, 76, 24], score=0.998761, text='100%')
+  OCRResult(box=[451, 290, 17, 18], score=0.177272, text='1')
+  OCRResult(box=[581, 60, 33, 30], score=0.868353, text='因')
+  OCRResult(box=[619, 26, 61, 27], score=0.999816, text='100%')

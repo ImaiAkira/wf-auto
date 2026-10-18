@@ -1,0 +1,189 @@
+{
+    // 战阵之宴自动刷（RAID EVENT）—— 极简循环版
+    // ============================================================================
+    // ★已并入「自动刷副本」（SpecialEntry）★
+    //   · RaidEntry 变成【别名入口】：直接 next -> SpecialEntry，不再自己分发。
+    //   · 所有 raid 业务节点的 next 一律回指 SpecialEntry（★绝不回 RaidEntry★）。
+    //   · 循环链放在 RaidDispatch（种类分派器）：识别器 batch_mode 只在当前种类=raid 时
+    //     命中；SpecialEntry 里把它排在 special 业务节点之前，故 raid 模式不会误走导航。
+    //     清单为空时种类由任务入口决定（RaidEntry->raid），旧「战阵之宴」行为不变。
+    //
+    // 设计：不做任何导航，直接在「你当前已经打开的页面」上循环：
+    //     点「挑战」 -> 自动战斗（等待） -> 结算推进 -> 点「再次挑战」 -> 回到「挑战」…
+    //
+    // 已移除（原「乏龙之宴」那一套不稳定逻辑）：
+    //     首领模板匹配、难度行点击、活动列表/首领列表滚动、主界面导航、自动续战开关
+    //
+    // ===== 实机踩过的坑，改之前先读这里 =====
+    //  1) 判断「战斗中」绝不能只看「分数」：
+    //     编队页有一行提示「若关闭游戏/切换画面/超过时限 则分数可能不会被记录」，
+    //     它也含「分数」。只看「分数」会误判成战斗 -> 一直空等 -> 永远不点挑战。
+    //     所以必须 And(时间 + 分数)。
+    //  2) 弹窗识别里不要用「领取」：
+    //     编队页有「已领取」角标，会误匹配并乱点。
+    //  3) 「挑战」节点必须排在所有弹窗节点前面。
+    //  4) 结算最后一屏「OK」和「再次挑战」是底部【并排】的两个按钮：
+    //         OK       文字框 [189,1181] -> 约 (214,1200)  左
+    //         再次挑战  文字框 [461,1180] -> 约 (523,1200)  右
+    //     所以「再次挑战」必须排在「OK」之前，否则会点 OK 把循环退出。
+    //     也正因如此，结算页【绝对不要用固定坐标点底部】——
+    //     底部中间 (358,1198) 正好是这两个按钮之间的空白/交界，点了就是「乱点/误点」。
+    //  6) 【RaidBattleWait 必须排在分发链最后】（2026-09-24 实机卡死，代价：32 分钟 1244 圈空转）
+    //     RaidBattleWait = And(「时间」,「分数」)，而结算页的奖励条目本身就含有这两个词：
+    //          {"text":"战斗分数"}        -> 命中「分数」
+    //          {"text":"最长滞空时间6秒"}  -> 命中「时间」
+    //     它原本排在第 2 位 -> 结算页被判成「战斗中」-> 无限 DoNothing 空等 ->
+    //     永远轮不到后面的 RaidContinue(「继续」)/PubQuestResult(公共横幅快进)，任务表现为「卡死」。
+    //     它不是出口型节点，只是「不确定时别乱点」的兜底等待，
+    //     所以正确位置是最后一名（仅高于无条件的 RaidWait）。
+    //  5) 结算页统一用【顶部 QUESTRESULT 横幅】推进：
+    //         QUESTRESULT 文字框 [190,74,703,110]，中心约 (541,129)
+    //     顶部横幅与底部按钮在空间上完全分离，点它不可能碰到 OK/再次挑战，安全。
+    //     实测「升级！/等级最大！/体力全部回复了！」这类结算页没有任何按钮文字，
+    //     但同样有 QUESTRESULT，所以一条规则就能覆盖所有结算变体。
+    // =======================================
+    //
+    // ProjectInterface 选项覆盖：
+    //   RaidContinueChallenge.max_hit -> 循环次数（选项「战阵刷几次」）
+    // ============================================================================
+    //
+    // ★#45 声明：战阵之宴在【主城出发的批量清单】里不可达（配置层声明的能力缺口）★
+    // ============================================================================
+    // 本文件的设计就是【不做任何导航】（见上「设计：不做任何导航，直接在『你当前已经
+    // 打开的页面』上循环」）：它假定战阵之宴页面【已经由用户手动打开】，随后只负责
+    // 挑战 → 结算 → 再次挑战 的循环。主城（含左侧轮播横幅 / 右下的活动 / 领主战入口）
+    // 上【没有任何】战阵之宴入口 —— 真机 16448 整屏 OCR 只有 修行之道 / 摇曳的迷宫 /
+    // 活动 / 领主战 / 关卡 / 城镇 / 角色 / 商店 / 扭蛋 / 菜单，且混合清单里战阵之宴那一段
+    // 在主城上等了整整 45s 也没能开打。
+    //   ⇒ 「从主城到不了战阵之宴」是**设计层面的能力缺口**，不是运行期故障。
+    //
+    // 处置（与 agent/side_impl.py::UNREACHABLE_FROM_MAIN_CITY 是【同一条声明】）：
+    //   · 从主城出发的批量清单里遇到战阵之宴 → 一确认中立页即【明确跳过并记录原因】，
+    //     **不再等 45s 超时**（宽限 grace_sec = 0），绝不假记账、绝不空转；
+    //   · 单目标「战阵之宴自动刷」（RaidEntry，清单为空）行为不变 —— 那条路径不走指挥官，
+    //     仍按本文件的循环在用户已打开的页面上工作。
+    //   · 守卫把「本声明 + agent 声明 + 运行期行为」钉在一起：tools/contract_hooks/hooks_45.py。
+    // 恢复条件：游戏给出从主城可导航到的战阵之宴入口，并补真机证据后，删掉本条声明即可。
+    // ============================================================================
+    "RaidEntry": {
+        // 别名入口：薄节点，直接跳统一分派器 SpecialEntry。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["SpecialEntry"]
+    },
+    "RaidDispatch": {
+        // 【种类分派器】只在当前副本种类=raid 时命中（BatchModeRecognition）。
+        // 命中后按下面的 next 跑 raid 循环链；链上节点跑完都回 SpecialEntry。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "batch_mode",
+                "custom_recognition_param": { "kind": "raid" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": [
+            // ★「体力不足 → 星岛石恢复」★（scene/stamina.py 是真源）：战阵之宴「挑战」消耗体力，
+            //   不足时游戏弹回复体力弹窗 —— 共享节点「先点星导石行、再点确认框 OK」（只用星岛石）。
+            // ★#102 P0-1★ 第一步的**模板优先**通道（真源 scene/stamina.py::RECOVERY_STEPS）：
+            //   与下面那条 OCR 版是同一动作（点星导石行框中心），只差行判据（图标模板 vs 行名 OCR）；
+            //   必须排在 OCR 版**之前**（next 是有序候选，先命中先执行）。
+            "[JumpBack]PubStaminaUseStoneTpl",
+            "[JumpBack]PubStaminaUseStone",
+            "[JumpBack]PubStaminaConfirmOk",
+            "[JumpBack]PubStaminaDoneOk",
+            // 公共「挑战」（common.json）：原地替换原 RaidChallenge，[JumpBack] 等价。
+            "[JumpBack]PubChallenge",
+            "RaidContinueChallenge",
+            "RaidContinue",
+            // 公共结算继续（common.json）：原地替换原 RaidSettlementExit（^OK$）。
+            "[JumpBack]PubResultContinue",
+            // 公共 QUESTRESULT 快进（common.json）：原地替换原 RaidQuestResult。
+            "[JumpBack]PubQuestResult",
+            "RaidPopupClose",
+            "RaidStorySkipConfirm",
+            // 公共跳过剧情（common.json）：原地替换原 RaidStorySkip。
+            "[JumpBack]PubSkipStory",
+            "RaidBattleWait",
+            "RaidWait"
+        ]
+    },
+    "RaidBattleWait": {
+        // 战斗中：判据收敛到 common.json 的 PubBattleTime/PubBattleScore
+        // （And：时间 \d+:\d+ + 分数 \d，见坑点 1）。
+        // ★绝不改回裸「时间」「分数」：结算页奖励条「战斗分数」「最长滞空时间6秒」
+        //   会同时命中 → 无限空等 → 32 分钟 1244 圈死循环（见坑点 6）★
+        // post_delay 与分派位置沿用本文件实测值（2000；必须在分派链最后）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubBattleTime", "PubBattleScore"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 2000,
+        "next": ["SpecialEntry"]
+    },
+    "RaidContinueChallenge": {
+        // 结算最后一屏：再次挑战 / 继续挑战 —— 循环的核心节点，最高优先（见坑点 4）
+        //
+        // 这里【故意不写 max_hit】：不写 = UINT_MAX = 无限，即一直刷、永不退出。
+        // 需要限制次数时，由 ProjectInterface 的「战阵刷几次」选项覆盖 max_hit
+        // （批量模式下由指挥官按目标剩余次数覆盖并换成 special_batch_finish 记账）。
+        //
+        // 注意：填 0【不等于】无限！官方语义是「最多命中 0 次」= 该节点被完全跳过，
+        //       会导致永远不点「再次挑战」，立刻从 OK 退出。要无限就留空/填大数。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["再次挑战", "继续挑战"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1200,
+        "next": ["SpecialEntry"]
+    },
+    "RaidContinue": {
+        // 结算页：只有「继续」/「确定」/「确认」文字时点它（点识别框中心）。
+        // 【刻意不含 "^OK$"】：OK 与「再次挑战」同屏并排，必须让位（见坑点 4）。
+        // ★本节点【刻意不收敛】到 common.PubResultContinue★：判据多了「确定/确认」
+        //   且刻意不含 OK —— 与公共判据（^继续$ / ^OK$）不同；按「判据原样照搬、不改」
+        //   原则保留本地一份，绝不硬套（否则会丢 确定/确认 或把 OK 提前）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^继续$", "^确定$", "^确认$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1000,
+        "next": ["SpecialEntry"]
+    },
+    "RaidPopupClose": {
+        // 「关闭」按钮弹窗：直接点按钮本身（默认点识别框中心，比固定坐标稳）
+        // ★#67 判据已收敛到公共 common.PubRewardDone*★（战阵之宴奖励弹窗「讨伐完成」+【关闭】）：
+        //   领主战页面上出现的是**同一张**弹窗，两处共用一份判据（绝不复制第二份 expected）；
+        //   本节点保留薄包装（战阵之宴链照常引用它，动作/延时/next 原样），只把 recognition
+        //   换成公共与门 [PubRewardDoneText, PubRewardDoneBtn]（box_index=1 = 【关闭】框）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubRewardDoneText", "PubRewardDoneBtn"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 800,
+        "next": ["SpecialEntry"]
+    },
+    "RaidStorySkipConfirm": {
+        // 跳过二次确认弹窗
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["点击【跳过】"] }
+        },
+        "action": { "type": "Click", "param": { "target": [521, 868] } },
+        "post_delay": 800,
+        "next": ["SpecialEntry"]
+    },
+    "RaidWait": {
+        // 兜底等待（过场/加载）。
+        // 这里【故意没有】盲目兜底点击：一旦停在首领列表等非预期页面，
+        // 盲目点屏幕只会变成「乱点」，所以让它老实等待。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    }
+}

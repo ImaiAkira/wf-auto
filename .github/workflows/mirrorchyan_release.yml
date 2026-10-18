@@ -1,0 +1,46 @@
+# Mirror酱为第三方分发服务，新项目默认关闭。
+# 当前状态：owner / repo / rid 已换成真名，但 workflow 仍然 `if: false` ——
+# **需向 Mirror 酱申请真实 rid 并开通后才能开启**，直接自行开启是无法使用的。
+# https://mirrorchyan.com/
+
+name: mirrorchyan_release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        default: ''
+        required: false
+#   release:
+#     types: [published]
+
+jobs:
+  mirrorchyan:
+    # 需向 Mirror 酱申请真实 rid 并开通后才能开启；开启时把下一行换成
+    # `if: ${{ github.repository_owner == 'ImaiAkira' }}`。
+    if: false
+    # action 是 Node 实现，不需要 macOS runner；开通后再决定是否跑在 ubuntu 上。
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 install.yml 的矩阵保持一致：本期 release 只产出 win × x86_64。
+        include:
+          - os: win
+            arch: x86_64
+    steps:
+      - uses: MirrorChyan/uploading-action@v1
+        with:
+          filetype: latest-release
+          # 对应 release 资产名：wf-auto-win-x86_64-<tag>.zip
+          filename: ${{ format('wf-auto-{0}-{1}-*', matrix.os, matrix.arch) }}
+          mirrorchyan_rid: wf-auto
+          tag: ${{ inputs.tag }}
+
+          os: ${{ matrix.os }}
+          arch: ${{ matrix.arch }}
+
+          owner: ImaiAkira
+          repo: wf-auto
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          upload_token: ${{ secrets.MirrorChyanUploadToken }}

@@ -1,0 +1,794 @@
+{
+    // 外传 Side Story —— 「自动过外传」（剧情 + 打关 / 只打当前，已合并为一个任务）
+    // 入口：SideStoryEntry（SideClearEntry 保留为【等价别名入口】，兼容旧配置）
+    //
+    // ===================== 识别驱动导航（新增） =====================
+    //   主城（中央【关卡】大按钮）→ 关卡页（右侧【外传故事】横幅）→ 外传故事列表
+    //     · SideNavStage     ：主城点【关卡】   （坐标来自真机 16448 step0_16448.png）
+    //     · SideNavStoryTab  ：关卡页点【外传故事】（坐标来自真机 16448 step1.png）
+    //   两个节点都是「看到才点」：已在目标页 / 已在某个外传里时都不命中，
+    //   所以手动进外传、或在任意外传内直接跑任务，行为与以前完全一致（纯增量）。
+    //   ★判据精确★：见各节点注释（ROI + 两端锚定，绝不做宽匹配）。
+    //
+    // ===================== 选项「外传是否刷所有的」 =====================
+    //   本文件不定义 interface.json；由上层（编排）把该选项挂到任务「自动过外传」上。
+    //   · 是（默认）= 现状：清完「外传故事列表」里所有未通关外传。
+    //   · 否 = 只打【当前已打开】的那一个外传，禁止在列表页点第一张卡：
+    //       - SideClearPickTab   → recognition 置 OCR expected ["__NONE__"]（关「未通关」tab）
+    //       - SideClearEnterCard → recognition 置 OCR expected ["__NONE__"]（关「点第一张卡」）
+    //       - SideClearListGate  → action 置 StopTask（打完当前外传回到列表即收工；
+    //                               也兜住「否」却在列表页起跑的情况，绝不空转）
+    //     ★刻意【不关】SideClearDone（空列表收工）与 SidePageDoneStop（防空转）★。
+    //     ★导航节点 SideNavStage/SideNavStoryTab 不关★：它们只是把游戏带到列表；
+    //       「否」下到达列表后由 SideClearListGate 收工，不会点卡，语义仍安全。
+    //
+    // 【重要设计原则：本文件必须自包含，不要复用 auto_push.json 的节点！】
+    //   踩过的坑：曾经直接引用 auto_push 的节点，但那些节点的 next 都写着 ["AutoPush"]，
+    //   于是外传任务执行到任一个复用节点后，管线就【跳进 AutoPush 的分派器】，
+    //   变成主线任务在跑 —— 表现为 PushStageFixed 反复点死坐标 (351,463) 空转卡死。
+    //   所以这里每个节点都用 Side* 前缀自带一份，next 一律指回 SideStoryEntry。
+    //
+    // ================= 实测流程（16448，1080x1920 原始坐标）=================
+    //   外传列表页（STORY 标签 + NEW / COMPLETE!! 徽标）
+    //     ↓ 点 NEW 徽标所在那一行（SideStoryEnter）
+    //   弹窗「是否开始阅读故事?」 否 [271,1212]  是 [760,1210]  -> SideReadYes 点「是」
+    //     ↓ 加载 -> 剧情（跳过> [919,46]）-> 跳过确认（跳过 原始 (783,1303)）
+    //     ↓ 关卡详情页（有「战斗」/「推荐编成」）-> SideFight 点「战斗」
+    //     ↓ 编队页 -> SideChallenge 点「挑战」-> 战斗 -> 结算 -> 回列表 -> 下一关
+    //
+    // ================= 其它踩过的坑 =================
+    //  1) 进入关卡的锚点必须用 NEW 徽标，不能用 STORY 标签（每行都有 STORY，
+    //     OCR 的 best 按分数选会落在已通关的行上）。
+    //  2) 绝不做盲目兜底点击：认不出的画面只等待（SideWait），不满屏乱点。
+    //  3) 不做「自动关菜单」：实测点菜单里的返回会把页面一起退走，
+    //     且判据「成长基金」在菜单外也存在会误触发。
+    //  4) 全部节点不设 max_hit（累计计数用满后节点会被静默跳过）。
+    // =================================================
+    "SideStoryEntry": {
+        "next": [
+            // 公共换日弹窗（common.json）：最临时的全局打断，放最前。
+            "[JumpBack]PubDailyPopup",
+            "SideStallRecover",
+            // 公共账号页/标题页推进（common.json）：原地替换原 SideLoginContinue/SideTitleStart。
+            // ★等价性★：二者原 next=["SideStoryEntry"]；两个入口分派表逐项一致，
+            //   [JumpBack] 回各自调用入口，行为等价。
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            // 公共加载等待（common.json）：纯等待不点击；沿用原 SideLoadingWait 的位置。
+            "[JumpBack]PubLoadingWait",
+            "SideResultContinue",
+            "SideResultFallback",
+            // 公共升级结算（common.json）：原地替换原 SideLevelUpContinue。
+            // ★等价性★：原 next=["SideStoryEntry"]（两个入口分派表一致）→ [JumpBack] 等价。
+            "[JumpBack]PubLevelUpContinue",
+            "SideItemContinue",
+            "SideRewardClose",
+            "SideNewCharTap",
+            "SideReadYes",
+            "SideSkipConfirm",
+            // 公共跳过剧情（common.json）：原地替换原 SideSkipStory。
+            // ★等价性★：原 next=["SideStoryEntry"]（两个入口分派表完全一致）→ [JumpBack] 等价。
+            "[JumpBack]PubSkipStory",
+            "SideLeaveRoom",
+            // ★「体力不足 → 星岛石恢复」★（scene/stamina.py 是真源）：外传关卡「挑战」消耗体力，
+            //   不足时游戏弹回复体力弹窗 —— 共享节点「先点星导石行、再点确认框 OK」（只用星岛石）。
+            //   两个入口分派表（SideStoryEntry / SideClearEntry）逐项一致，故两处都插。
+            // ★#102 P0-1★ 模板通道排在 OCR 版**之前**（模板优先、OCR 兜底）：两者都是
+            //   「And(弹窗正文, 星导石行) → 点该行框中心」，只差行判据（图标模板 vs 行名 OCR）。
+            //   真源：scene/templates.py（STONE_TPL_WIRED_HUBS / STONE_TPL_REF）。
+            "[JumpBack]PubStaminaUseStoneTpl",
+            "[JumpBack]PubStaminaUseStone",
+            "[JumpBack]PubStaminaConfirmOk",
+            "[JumpBack]PubStaminaDoneOk",
+            // 公共「挑战」（common.json）：原地替换原 SideChallenge。
+            // ★等价性★：原 next=["SideStoryEntry"]（两个入口分派表一致）→ [JumpBack] 等价。
+            "[JumpBack]PubChallenge",
+            "SideBattleWait",
+            "SideClearDone",
+            "SideClearPickTab",
+            "SideClearEnterCard",
+            "SideClearListGate",
+            "SideNextSpecial",
+            "SideNextStory",
+            "SideNextBattle",
+            "SideFight",
+            "SideEnter",
+            "SidePageDoneStop",
+            "SidePageDone",
+            "SideBack",
+            // 识别驱动导航（本文件头有完整说明）：主城 → 关卡页 → 外传故事列表。
+            // 放在最后（SideWait 之前）：只有其它节点全不命中（=不在任何外传流程里、
+            // 手动停在主城/关卡页）时才轮到它；已在目标页则不命中。
+            "SideNavStage",
+            "SideNavStoryTab",
+            "SideWait"
+        ]
+    },
+    "SideClearEntry": {
+        // 【外传全清】入口：从「外传故事列表」开始，点「未通关」→ 逐个进外传打完 → 返回列表 → 直到列表空。
+        // 与 SideStoryEntry 共用同一套 Side*/SideClear* 节点（分派列表保持一致），
+        // 区别只在任务起点：本任务起点是外传故事列表页。
+        "next": [
+            // 公共换日弹窗（common.json）：最临时的全局打断，放最前。
+            "[JumpBack]PubDailyPopup",
+            "SideStallRecover",
+            // 公共账号页/标题页推进（common.json）：原地替换原 SideLoginContinue/SideTitleStart。
+            // ★等价性★：二者原 next=["SideStoryEntry"]；两个入口分派表逐项一致，
+            //   [JumpBack] 回各自调用入口，行为等价。
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            // 公共加载等待（common.json）：纯等待不点击；沿用原 SideLoadingWait 的位置。
+            "[JumpBack]PubLoadingWait",
+            "SideResultContinue",
+            "SideResultFallback",
+            // 公共升级结算（common.json）：原地替换原 SideLevelUpContinue。
+            // ★等价性★：原 next=["SideStoryEntry"]（两个入口分派表一致）→ [JumpBack] 等价。
+            "[JumpBack]PubLevelUpContinue",
+            "SideItemContinue",
+            "SideRewardClose",
+            "SideNewCharTap",
+            "SideReadYes",
+            "SideSkipConfirm",
+            // 公共跳过剧情（common.json）：原地替换原 SideSkipStory。
+            // ★等价性★：原 next=["SideStoryEntry"]（两个入口分派表完全一致）→ [JumpBack] 等价。
+            "[JumpBack]PubSkipStory",
+            "SideLeaveRoom",
+            // ★「体力不足 → 星岛石恢复」★（scene/stamina.py 是真源）：外传关卡「挑战」消耗体力，
+            //   不足时游戏弹回复体力弹窗 —— 共享节点「先点星导石行、再点确认框 OK」（只用星岛石）。
+            //   两个入口分派表（SideStoryEntry / SideClearEntry）逐项一致，故两处都插。
+            // ★#102 P0-1★ 模板通道排在 OCR 版**之前**（模板优先、OCR 兜底）：两者都是
+            //   「And(弹窗正文, 星导石行) → 点该行框中心」，只差行判据（图标模板 vs 行名 OCR）。
+            //   真源：scene/templates.py（STONE_TPL_WIRED_HUBS / STONE_TPL_REF）。
+            "[JumpBack]PubStaminaUseStoneTpl",
+            "[JumpBack]PubStaminaUseStone",
+            "[JumpBack]PubStaminaConfirmOk",
+            "[JumpBack]PubStaminaDoneOk",
+            // 公共「挑战」（common.json）：原地替换原 SideChallenge。
+            // ★等价性★：原 next=["SideStoryEntry"]（两个入口分派表一致）→ [JumpBack] 等价。
+            "[JumpBack]PubChallenge",
+            "SideBattleWait",
+            "SideClearDone",
+            "SideClearPickTab",
+            "SideClearEnterCard",
+            "SideClearListGate",
+            "SideNextSpecial",
+            "SideNextStory",
+            "SideNextBattle",
+            "SideFight",
+            "SideEnter",
+            "SidePageDoneStop",
+            "SidePageDone",
+            "SideBack",
+            // 识别驱动导航（本文件头有完整说明）：主城 → 关卡页 → 外传故事列表。
+            // SideClearEntry 与 SideStoryEntry 的分派表保持【逐项一致】（别名入口）。
+            "SideNavStage",
+            "SideNavStoryTab",
+            "SideWait"
+        ]
+    },
+    "SideStallRecover": {
+        // 【卡死自恢复·需求 #3】画面连续 N 秒无变化 → 判定卡死 → 结束任务（不空转）。
+        // 阈值复用 interface「无响应重开阈值」（默认 180s），不新造一套。
+        //
+        // ★为什么放在分派表【很靠前】★（紧随公共换日弹窗 PubDailyPopup）
+        //   MaaFramework 逐项识别、先命中先执行。放在很靠前可保证【每一轮】都评估，
+        //   连「某个节点反复命中但画面纹丝不动」的死循环也能兜住；放在后面时，
+        //   只要前面某个节点一直命中，本节点就永远轮不到。
+        //   注意：公共换日弹窗故意排在它【前面】（最临时的全局打断），所以若弹窗
+        //   被点了却因输入冻结不消失，弹窗会持续命中、本节点轮不到 —— 见 common.json 的说明。
+        //   正常流程画面在动 → diff 超阈值 → 不命中，对流程零副作用。
+        //
+        // ★误报风险★：识别/等待节点（SideWait/PubLoadingWait/SideBattleWait）本身
+        //   不改变画面。若某个加载页/等待页真的静止超过阈值（网络卡死、游戏 hang），
+        //   本节点会命中并收工 —— 这恰恰是我们要的「卡死兜底」；只有「画面真的静止
+        //   但流程其实在正常等待超 180s」才会误伤，实测正常流程不存在这种静止。
+        //
+        // ★恢复动作为什么选 StopTask（而不是 restart_game）★
+        //   本文件现已自带「主城 → 关卡页 → 外传故事列表」的导航（SideNavStage/
+        //   SideNavStoryTab）。但本次改动遵循【纯增量】，不改卡死恢复语义：
+        //   仍用 StopTask 干净收工（绝不空转），由用户/上层重新进入外传；
+        //   改成 restart_game（拉回主城再自动导航）属后续独立改动。
+        //   （特殊副本那边 SpecialStallRecover 一直用 restart_game。）
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stall_recover",
+                "custom_recognition_param": { "threshold_sec": 180 }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["SideStoryEntry"]
+    },
+    "SideClearDone": {
+        // 【外传全清·终止判据】「未通关」列表已空时结束任务。
+        // ★真实文案已实测（clear_all 跑空列表时抓屏 side_empty.png，720 (357,806)）：
+        //   「未找到符合的外传故事」★
+        // 命中即 StopTask 收工 —— 这就是「未通关列表也没有可进的卡片」的收工条件。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["未找到符合的外传故事"] }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "next": ["SideStoryEntry"]
+    },
+    "SideClearPickTab": {
+        // 【外传全清】外传故事列表页：点「未通关」筛选 tab（实测 u1 (119,405)）。
+        // max_hit:1 —— 点一次即可，否则每轮都命中会饿死后面「进卡片」的节点。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["未通关"], "roi": [0, 375, 240, 70] }
+        },
+        "action": { "type": "Click", "param": { "target": [119, 405] } },
+        "max_hit": 1,
+        "post_delay": 1500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideClearListTitle": {
+        // 仅作 SideClearEnterCard 的子识别：外传故事列表页标题。
+        // 用 And 把「进卡片」限制在列表页内，避免在别的页面误命中卡片标记。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["外传故事列表"] }
+        }
+    },
+    "SideClearCardMark": {
+        // 仅作 SideClearEnterCard 的子识别：卡片上的「角色加入/装备获得」标记。
+        // ROI 限定第一张卡带（实测 u1 第一张在 720 y≈566，第二张 y≈711 已被排除）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["角色加入/装备获得"], "roi": [0, 430, 720, 170] }
+        }
+    },
+    "SideClearEnterCard": {
+        // 【外传全清】外传故事列表页：点【第一张卡】进入该外传的关卡列表。
+        // And(列表标题 + 第一张卡标记) 双重限定；box_index=1 取卡片标记框（仅用于定位，点击用固定点）。
+        // 命中才点第一张卡固定位置 (360,480)；列表为空没有标记 → 不会乱点。
+        // ★P0（本票）★：上面两行已【过时】——动作已从死坐标 (360,480) 改为 target:true
+        //   （点识别框中心）。死坐标不随识别框走：卡带一抖就可能落到卡左下
+        //   （详情页左下 = 【推荐编成】→ 弹 Party 选择层、改掉用户队伍配置）。
+        //   标记框在卡内 → 点它即开卡；列表为空没有标记 → 不会乱点（语义不变）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["SideClearListTitle", "SideClearCardMark"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideClearListGate": {
+        // 【外传全清·返回保护】外传故事列表页：只等待，绝不按返回键。
+        // 排在 SideBack 之前「吃掉」列表页的分派，防止 SideBack 的 ^STORY$ 在列表页被
+        // 误命中 → 连按返回键把游戏退回标题页（规格 B3 指出的隐患）。
+        // 实测列表页没有 STORY，本节点是双保险；列表为空时任务停在这里等待。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["外传故事列表"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 1500,
+        "next": ["SideStoryEntry"]
+    },
+    // =====================================================================
+    // 【账本驱动的选关】—— 外传关卡列表分派只对「账本说下一个该做」的那一行出手
+    //
+    // next_stage 的参数：
+    //   · row_type="特殊战斗" / "STORY" / "战斗"  —— 只挑该类型的行，实现
+    //     「长按剧情行 / 普通点击剧情行 / 普通点击战斗行」的区分；
+    //   · require_badge=true —— 只在外传关卡列表页命中（页面有 NEW/COMPLETE 徽标）；
+    //   · 默认 check_badge=true —— 画面上已标 COMPLETE!! 的行直接被跳过
+    //     （用户手动通透过、账本里没有的旧关卡也不会再碰）。
+    //
+    // 选中后 next_stage 会把 (scope, 关卡名) 写进 pending，做完由 mark_done 记账；
+    // 已记账的关卡在后续任何一轮 next_stage 里都不会再被返回 —— 这就是
+    // 「已完成的绝不再碰 / 不重复打同一关」的直接保证。
+    // =====================================================================
+    "SideNextSpecial": {
+        // 剧情/特殊行（行类型标签「特殊战斗」）：普通点击无效，必须【长按标题】。
+        // 实测 720 (259,733)，约 800ms。target:true = 用 next_stage 返回的标题框。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "next_stage",
+                "custom_recognition_param": {
+                    "scene": "side_story",
+                    "row_type": "特殊战斗",
+                    "require_badge": true
+                }
+            }
+        },
+        "action": {
+            "type": "LongPress",
+            "param": { "target": true, "duration": 800 }
+        },
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideNextStory": {
+        // 纯剧情行（只有 STORY 标记）：普通点击标题进入。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "next_stage",
+                "custom_recognition_param": {
+                    "scene": "side_story",
+                    "row_type": "STORY",
+                    "require_badge": true
+                }
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideNextBattle": {
+        // 战斗行（行类型标签「战斗」）：普通点击标题进入。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "next_stage",
+                "custom_recognition_param": {
+                    "scene": "side_story",
+                    "row_type": "战斗",
+                    "require_badge": true
+                }
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideMarkDonePending": {
+        // 剧情走完（新角色画面点掉）后，把 next_stage 选中的那一关记进账本。
+        // 只经 SideNewCharTap.next 到达，不在主分派表里，不会空跑。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "mark_done",
+                "custom_action_param": { "scene": "side_story" }
+            }
+        },
+        "next": ["SideStoryEntry"]
+    },
+    "SideStoryNodeLabel": {
+        // 仅作 SideStoryNode 的子识别：关卡列表【当前 NEW 行】的行类型标签「特殊战斗」。
+        // ★判据依据（16448 实测 ax6 / 手动长按复现）★：
+        //   · 普通战斗行的行类型标签是精确的「战斗」（秘宝之力行，720 (103,1084)）；
+        //   · 特殊/锁档行的行类型标签是「特殊战斗」（前往圣地行，720 (104,794)）。
+        //   用 ^特殊战斗$ 精确匹配，天然排除普通战斗行（^战斗$ 不会命中「特殊战斗」，
+        //   反之 ^特殊战斗$ 也不会命中「战斗」）。d4.png（领主战纯战斗行：NEW + 首次报酬 + 战斗）
+        //   没有「特殊战斗」→ 本节点不命中（负样本回归点）。
+        // ROI 限定在【关卡列表第 1 行行内】(y 600~830)：实测关卡列表总是把当前 NEW 行
+        //   自动滚到最上方（ax6/fight_before/stage_list2/new_detail 均 NEW y=685、
+        //   特殊战斗 y=794；st_after2 的 NEW 行 y=685 也是 STORY 行）。
+        //   → 用「同一行带」把 NEW 徽标和「特殊战斗」标签关联起来，避免
+        //     「NEW 在 STORY 行、特殊战斗 在别处 COMPLETE 行」时误命中
+        //     （st_after2：NEW 行 y685 是 STORY，特殊战斗 y1082 属 COMPLETE 的 前往圣地，
+        //      若不加 ROI 会错误地去长按已通关的行）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^特殊战斗$"], "roi": [0, 600, 720, 230] }
+        }
+    },
+    "SideStoryNodeNew": {
+        // 仅作 SideStoryNode 的子识别：关卡列表第 1 行的 NEW 徽标（未通关标记）。
+        // ★必须与 SideStoryNodeLabel 用【同一个行带 ROI】，实现行内关联★。
+        // 实测 ax6 NEW 徽标 720 (41,685)、st_after2 (40,685)，都在本 ROI 内。
+        // （SideNewCharTap 用的是大 NEW 徽标 roi [0,800,400,340]，本 ROI 在 y600~830，
+        //   不会互相抢；列表页的小 NEW 徽标 y≈685 也不会被 SideNewCharTap 命中。）
+        // ★正则用 ^NEW 而不是 ^NEW$★：实测 HERO BEGINNING 外传的 NEW 徽标紧贴像素立绘，
+        //   OCR 会多读出一个尾巴「NEWT」(clr_SideClearEntry_STALL.png 720 (49,690))，
+        //   ^NEW$ 因此漏判导致整页没有任何节点命中 → stall。^NEW 前缀匹配可容错。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^NEW"], "roi": [0, 600, 720, 230] }
+        }
+    },
+    "SideStoryNode": {
+        // 【进剧情/特殊节点】关卡列表里【同一行】同时是 NEW + 特殊战斗 的那一行：
+        //   普通点击对它无效，必须【长按】该行标题文字才能进入（实测约 800ms）。
+        //   进入后要么是剧情页（走 SideSkipStory/SideSkipConfirm/SideNewCharTap），
+        //   要么是关卡详情页（走 SideChallenge），两条路都已在 next 分派表里接好。
+        //
+        // 【为什么必须有这个节点】旧的 SideFight = And(首次报酬, 战斗) 会在关卡列表上
+        //   误命中：列表里「未通关行有首次报酬」+「另一行的行类型标签是战斗」跨行凑齐，
+        //   于是 SideFight 去点那一行【已通关】的「战斗」标签 → 什么都不发生 →
+        //   进度纹丝不动（这就是外传清不空的根因）。
+        //   本节点排在 SideFight / SideEnter 之前，先把 NEW+特殊战斗 这一行打开。
+        //
+        // 【与战斗行的区分】战斗行特征 = 首次报酬 + 战斗（SideFight）；剧情/特殊行特征
+        //   = NEW + 特殊战斗 且该行【没有】「战斗」标签。这里用 ^特殊战斗$ 与行内 ROI
+        //   双重限定，保证 d4.png 这类纯战斗行仍归 SideFight，不被本节点抢走。
+        //
+        // 【长按目标】box_index=0 取「特殊战斗」标签框作锚点，target_offset 偏移到该行
+        //   标题文字中心：实测 720 标签(104,794) → 标题(259,739)，偏移 (+155,-55)。
+        // ★本票审计★：本节点是【外传关卡列表的行锚点】——「该行卡片」没有 OCR 框，
+        //   只有行内小标签（特殊战斗）有框，故「锚点框 + 偏移到行标题中心」是必要的。
+        //   安全性：偏移【向左上】（-x,+y 反向：向右 +155、向上 -55）= 行标题中心（卡片中上部），
+        //   与详情页左下角的【推荐编成】无任何几何关系（本页根本没有该控件）→ 安全。
+        //   偏移幅值有界（|dx|≤300、|dy|≤120），守卫 tools/test_click_center.py 钉死。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["SideStoryNodeLabel", "SideStoryNodeNew"],
+                "box_index": 0
+            }
+        },
+        "action": {
+            "type": "LongPress",
+            "param": { "target": true, "target_offset": [155, -55, 0, 0], "duration": 800 }
+        },
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideResultContinue": {
+        // 结算页：继续 / OK。判据已收敛到 common.PubResultContinueText（本节点只作薄包装）。
+        // ★为什么不直接用 [JumpBack]PubResultContinue★：本节点 next 含 SideMarkDonePending
+        //   （战斗结束路径记账，见下），[JumpBack] 会「回到调用者 next 从头重扫」从而绕过
+        //   记账节点 → 不等价。故保留本地薄包装，只把 recognition 换成公共子识别。
+        // ★战斗结束路径记账★：结算页出现 = 这一场已经打完 → 经 SideMarkDonePending
+        //   把 next_stage 选中的那一关记进账本（剧情路径由 SideNewCharTap 记，两条都记）。
+        //   mark_done 幂等，多张结算页重复记也无害。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubResultContinueText"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1000,
+        "next": ["SideMarkDonePending", "SideStoryEntry"]
+    },
+    "SideResultFallback": {
+        // 结算页顶部横幅推进（OCR 常把 QUESTRESULT 截断成 QUESTRE）。
+        // 判据已收敛到 common.PubQuestResultText（本节点只作薄包装）。
+        // 同样接战斗结束记账，故与 SideResultContinue 一样不用 [JumpBack]（见其说明）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubQuestResultText"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1000,
+        "next": ["SideMarkDonePending", "SideStoryEntry"]
+    },
+    "SideItemContinue": {
+        // 获得道具页
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["获得道具", "获得初次报酬"] }
+        },
+        "action": { "type": "Click", "param": { "target": [358, 1198] } },
+        "post_delay": 1000,
+        "next": ["SideStoryEntry"]
+    },
+    "SideRewardClose": {
+        // 「关闭」按钮（剧情后的关闭弹窗等）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^关闭$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1200,
+        "next": ["SideStoryEntry"]
+    },
+    "SideNewCharTap": {
+        // 【新角色加入画面】（彩色五星 + 大 NEW 徽标 + 角色台词）
+        // ★判据已收敛到 common.PubNewCharText（薄包装）★
+        // 为什么不用 [JumpBack]PubNewCharTap：原 next=[SideMarkDonePending, SideStoryEntry]
+        //   含【记账节点 SideMarkDonePending】→ [JumpBack] 会绕过记账 → 不等价，保留薄包装。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubNewCharText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2000,
+        // 点到新角色画面 = 这一段剧情走完了 -> 立刻把账本上那一笔记掉，
+        // 再回主分派（此时该行已变 COMPLETE!!，下一轮 next_stage 自动跳过它）。
+        "next": ["SideMarkDonePending", "SideStoryEntry"]
+    },
+    "SideReadDialog": {
+        // 仅作 SideReadYes 的子识别：弹窗标题
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["是否开始阅读故事"] }
+        }
+    },
+    "SideReadYesBtn": {
+        // 仅作 SideReadYes 的子识别：弹窗的「是」
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^是$"] }
+        }
+    },
+    "SideReadYes": {
+        // 「是否开始阅读故事?」-> 点「是」。
+        // box_index=1 让点击目标是「是」按钮本身（不是标题）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["SideReadDialog", "SideReadYesBtn"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 3000,
+        "next": ["SideStoryEntry"]
+    },
+    "SideSkipConfirmText": {
+        // 仅作 SideSkipConfirm 的子识别：跳过确认框的提示文字
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["点击【跳过】"] }
+        }
+    },
+    "SideSkipConfirmBtn": {
+        // 仅作 SideSkipConfirm 的子识别：确认框里的「跳过」按钮。
+        // 用 ^跳过$ 精确匹配 —— 剧情页右上角那个是「跳过>」，不会被匹配到。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^跳过$"] }
+        }
+    },
+    "SideSkipConfirm": {
+        // 跳过确认框：点【识别到的】「跳过」按钮本身（不再用固定坐标）。
+        //
+        // 【为什么改成动态】实测固定坐标 [521,868] 点下去确认框不关，
+        // 而手动 adb tap 同一个屏幕位置是有效的 —— 说明固定坐标系换算有问题。
+        // 用 box_index=1 取「跳过」按钮的识别框，自动适配真实位置。
+        //
+        // 【为什么这个死循环很关键】之前这里点不中 -> 确认框关不掉 ->
+        // 下一轮 SideSkipStory 又去点右上角「跳过>」把它重新弹出来 ->
+        // 两个节点来回点 100 多次、剧情永远跳不过去。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["SideSkipConfirmText", "SideSkipConfirmBtn"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 2000,
+        "next": ["SideStoryEntry"]
+    },
+    "SideBattleWait": {
+        // 战斗中：判据收敛到 common.json 的 PubBattleTime/PubBattleScore
+        // （And：时间 \d+:\d+ + 分数 \d）。
+        // ★绝不改回裸「时间」「分数」：结算页「战斗分数」「最长滞空时间6秒」会误命中 → 空等死循环★
+        // post_delay 与分派位置沿用本文件实测值（3000）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubBattleTime", "PubBattleScore"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": ["SideStoryEntry"]
+    },
+    "SideFightGate": {
+        // 仅作 SideFight 的子识别：本关【首通奖励还没拿】= 这一关还没通过。
+        // 实测对比：关卡详情页在通关前有「首次报酬」[813,1078]，
+        // 通关之后这一项就消失了 —— 用它当"未通关"判据。
+        // （不能用 NEW 徽标：NEW 是列表里"下一关"的徽标，详情页上一直有，无效。）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["首次报酬"] }
+        }
+    },
+    "SideFightBtn": {
+        // 仅作 SideFight 的子识别：关卡详情页的「战斗」按钮
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^战斗$"] }
+        }
+    },
+    "SideFight": {
+        // 【只用于关卡详情页】同时满足「首通奖励还在（本关没通）」+「战斗在」+「本页
+        // 没有 NEW/COMPLETE 徽标（=不是关卡列表页）」才点战斗。
+        // box_index=1 让点击目标是「战斗」按钮本身。
+        //
+        // ★SideNoBadge 是关键修正★：旧实现只有前两个条件，会在【关卡列表页】跨行凑成
+        //   命中（第 1 行的「首次报酬」+ 第 3 行的「战斗」）-> 去点已通关行的战斗标签 ->
+        //   进度纹丝不动、反复打同一关。加上「不是列表页」后，列表分派完全交给
+        //   SideNextSpecial / SideNextStory / SideNextBattle（账本驱动）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["SideFightGate", "SideFightBtn", "SideNoBadge"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideNoBadge": {
+        // 仅作 SideFight 的子识别：画面上没有 NEW/COMPLETE 徽标（=不是外传关卡列表页）。
+        // 由 agent 的 no_list_badge 自定义识别实现（复用 OcrTask 全屏 OCR）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "no_list_badge",
+                "custom_recognition_param": { "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "SideEnter": {
+        // 进入【下一个未通关的关卡行】：锚定「NEW」徽标，向右下偏移到该行。
+        //   实测 NEW 徽标原始框 [21,1094,78,38]（中心 60,1113），
+        //   对应关卡行中心原始 (392,1236)，换算 720 空间偏移约 (+222, +82)。
+        //   通关后徽标变 COMPLETE!!、下一行出现 NEW，锚点自动前移。
+        // ★正则用 ^NEW 而不是 ^NEW$ 并加列表 ROI★：
+        //   HERO BEGINNING 外传的 NEW 徽标会被 OCR 读成「NEWT」(720 (49,690))，
+        //   ^NEW$ 会漏判 → 该页无节点可命中 → stall。^NEW 前缀匹配容错。
+        //   ROI 限定在关卡列表（y600~1280），避免误命中结算/道具页上的 NEW 字样。
+        // ★本票审计★：本节点是【外传关卡列表的行锚点】——「该行卡片」没有 OCR 框，
+        //   只有 NEW 徽标有框，故「NEW 框 + 偏移到行中心」是必要的（实测徽标中心(60,1113)
+        //   → 关卡行中心(392,1236)，720 偏移约 (+222,+82)）。
+        //   安全性：落点是【行卡片中心】（不是卡左下）；本页没有【推荐编成】控件 →
+        //   即便偏移抖动也点不到 Party 选择层。偏移幅值有界（|dx|≤300、|dy|≤120），
+        //   守卫 tools/test_click_center.py 钉死。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^NEW"], "roi": [0, 600, 720, 680] }
+        },
+        "action": {
+            "type": "Click",
+            "param": { "target": true, "target_offset": [222, 82, 0, 0] }
+        },
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SidePageDoneStop": {
+        // 【收工判据·防空转】连续多次「本页全清」且其间没有任何关卡完成 → StopTask 收工。
+        // 现场发现：某些外传的全部关卡都 COMPLETE!! 了，游戏却仍把它们留在「未通关」
+        // 列表里（实测 5 张卡的关卡列表全是 COMPLETE!!、无 NEW）。此时
+        //   SidePageDone 退回列表 → SideClearEnterCard 又进第一张（还是全清页）→ 死循环。
+        // 本节点由 page_done_repeat 自定义识别判定；排在 SidePageDone 之前，
+        // 达到阈值（默认连续 3 次全清且无 mark_done）就收工，对应需求「未通关列表
+        // 也没有可进的卡片时，任务才结束」，保证绝不空转。
+        // ★安全：StopTask 收工，不点击、不按返回键★。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "page_done_repeat",
+                "custom_recognition_param": { "ocr_entry": "OcrTask", "threshold": 3 }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["SideStoryEntry"]
+    },
+    "SidePageDone": {
+        // 【本页全清·出口·需求 #1】外传【关卡列表页】已全部 COMPLETE!!
+        //（没有任何 NEW / 未完成行）→ 判定这本外传打完了 → 点左下「返回」退回
+        //「未通关」列表清下一个；若列表也空了，由 SideClearDone 收工。
+        //
+        // 由 list_all_done 自定义识别判定：画面有 ≥1 个 COMPLETE!! 徽标、
+        // 且【没有任何 NEW 徽标】、且能解析出关卡行。
+        //
+        // 排在所有选关节点（SideNext*/SideStoryNode/SideEnter）之后、SideBack/SideWait
+        // 之前：真有关卡要做时先被前面节点接走，一个都选不出来时才走本出口。
+        //
+        // ★为什么必须有它★：旧的关卡列表出口只有 SideBack（判据 ^STORY$），
+        // 一本全部是「战斗」行（没有 STORY 字样）的关卡列表全 COMPLETE 后，
+        // SideBack 不命中 → 既不退出也不收工 → 空转 41 分钟（现场根因）。
+        // ★安全：只点屏幕「返回」(720 53,1259)，绝不 KeyEvent 4★。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "list_all_done",
+                "custom_recognition_param": { "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "Click", "param": { "target": [53, 1259] } },
+        "post_delay": 3000,
+        "next": ["SideStoryEntry"]
+    },
+    "SideBack": {
+        // 【这一页的关卡全打完了】-> 退回上一层（外传故事列表）去找下一个没打完的外传。
+        //
+        // 触发条件：页面上有 STORY 标签（说明是外传的关卡列表页），
+        //   而且排在前面的 SideNextSpecial/Story/Battle 与 SideEnter 都没命中
+        //   —— 即账本上本页的关卡都做完了。
+        //   「外传故事列表」那一层没有 STORY 字样（SideClearListGate 会先吃掉），
+        //   所以不会在这里误触发。
+        //
+        // ★安全红线：绝不使用 KeyEvent 4★（连按会一路退回标题页）。
+        //   改用页面上左下角的「返回」箭头（实测 720 (53,1259)）。
+        //   max_hit:3 兜底 —— 万一这一下没退动，最多点 3 次就交给 SideWait 等画面，
+        //   绝不无限连点。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^STORY$"] }
+        },
+        "action": { "type": "Click", "param": { "target": [53, 1259] } },
+        "max_hit": 3,
+        "post_delay": 3000,
+        "next": ["SideStoryEntry"]
+    },
+    "SideRoomPartyText": {
+        // 仅作 SideLeaveRoom 的子识别：多人房间页左列 Party 槽位（实测 x≈88）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["Party"], "roi": [0, 300, 220, 900] }
+        }
+    },
+    "SideRoomCopyText": {
+        // 仅作 SideLeaveRoom 的子识别：房间页「复制」(实测 x≈599)。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["复制"], "roi": [430, 0, 290, 1300] }
+        }
+    },
+    "SideRoomPowerText": {
+        // 仅作 SideLeaveRoom 的子识别：房间页「战力」(实测 x≈549)。三者俱全才是房间页。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["战力"], "roi": [430, 0, 290, 1300] }
+        }
+    },
+    "SideLeaveRoom": {
+        // 【外传多人房间页兜底】外传某关点【战斗】偶尔会直接进多人房间
+        // （实测 stall 截图：Party A + 复制 + 战力 + 战斗 (120,224)），
+        // 而 Side* 没有房间节点 → 卡死到 stall 超时。
+        // 命中「Party + 复制 + 战力」→ 点屏幕左下【返回】(720 (53,1259)) 退出后重试。
+        // ★用屏幕按钮，绝不用 KeyEvent 4★；max_hit:5 防进出死循环。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["SideRoomPartyText", "SideRoomCopyText", "SideRoomPowerText"],
+                "box_index": 0
+            }
+        },
+        "action": { "type": "Click", "param": { "target": [53, 1259] } },
+        "max_hit": 5,
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    // =====================================================================
+    // 【导航】主城 → 关卡页 → 外传故事列表（识别驱动）
+    //
+    // 坐标来自【真机 16448 真实截图】，不是「识别框 + 死偏移」猜按钮：
+    //   · step0_16448.png（主城）：【关卡】大按钮 OCR 原始框 [313,1088,93,50]（720 中心 359,1113）
+    //   · step1.png（关卡页）：【外传故事】横幅 OCR 原始框 [471,820,204,109]（720 中心 573,874）；
+    //     该横幅为斜体描边字，OCR 实测读成「小传故事」，故同时接受正确写法「外传故事」。
+    // 动作一律点【自己的识别框中心】(target:true)，零偏移。
+    // max_hit:3 —— 点不动时最多点 3 次就交给 SideWait/SideStallRecover，绝不无限连点。
+    // =====================================================================
+    "SideNavStage": {
+        // 主城中央【关卡】大按钮 → 关卡页。
+        // ROI 锁死主城中央按钮带（真机框 x313~406,y1088~1138 完全落在 ROI 内），
+        // 避免在别的页面命中「关卡」二字。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^关卡$"], "roi": [280, 1050, 180, 130] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "max_hit": 3,
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideNavStoryTab": {
+        // 关卡页右侧【外传故事】横幅 → 外传故事列表。
+        // ★两端锚定 + ROI★：外传列表页标题「外传故事列表」不会被 ^外传故事$ 命中。
+        "recognition": {
+            "type": "OCR",
+            "param": {
+                "expected": ["^小传故事$", "^外传故事$"],
+                "roi": [430, 790, 320, 160]
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "max_hit": 3,
+        "post_delay": 2500,
+        "next": ["SideStoryEntry"]
+    },
+    "SideWait": {
+        // 兜底：只等待，绝不点击（防止乱点）
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 1500,
+        "next": ["SideStoryEntry"]
+    }
+}
