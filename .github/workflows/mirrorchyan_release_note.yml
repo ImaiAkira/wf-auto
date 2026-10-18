@@ -1,0 +1,34 @@
+# Mirror酱为第三方分发服务，新项目默认关闭。
+# 当前状态：owner / repo / rid 已换成真名，但 workflow 仍然 `if: false` ——
+# **需向 Mirror 酱申请真实 rid 并开通后才能开启**，直接自行开启是无法使用的。
+# https://mirrorchyan.com/
+
+name: mirrorchyan_release_note
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        default: ''
+        required: false
+  release:
+    types: [edited] # [edited, published]
+
+jobs:
+  mirrorchyan:
+    # 需向 Mirror 酱申请真实 rid 并开通后才能开启；开启时把下一行换成
+    # `if: ${{ github.repository_owner == 'ImaiAkira' }}`。
+    if: false
+    runs-on: ubuntu-latest
+
+    steps:
+      - id: uploading
+        uses: MirrorChyan/release-note-action@v1
+        with:
+          mirrorchyan_rid: wf-auto
+          version_name: ${{ inputs.tag }}
+
+          owner: ImaiAkira
+          repo: wf-auto
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          upload_token: ${{ secrets.MirrorChyanUploadToken }}

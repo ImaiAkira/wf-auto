@@ -1,0 +1,485 @@
+{
+    // 重复刷图（摇曳的迷宫）
+    // ============================================================================
+    // ★已并入「自动刷副本」（SpecialEntry）★
+    //   · FarmEntry 变成【别名入口】：本身不做任何识别/导航，直接 next -> SpecialEntry。
+    //   · 所有 farm 业务节点的 next 一律回指 SpecialEntry（★绝不再回 FarmEntry★）：
+    //     回 FarmEntry 会经别名再跳 SpecialEntry，虽然也能到，但多绕一层、且与
+    //     「别名入口」语义不符；统一回 SpecialEntry 才是合并后的正道。
+    //   · 导航链放在 FarmDispatch（一个「种类分派器」）：识别器 batch_mode 只在
+    //     当前种类=farm 时命中，随后按 next 里的 farm 链导航；SpecialEntry 分派器里
+    //     把它排在 special 业务节点之前，故 farm 模式绝不会误走领主战导航。
+    //     清单为空时种类由任务入口决定（FarmEntry->farm），旧「重复刷图」行为不变。
+    //
+    // ★迷宫入口（2026-09-29 重定）★：主城【左侧轮播横幅】——标题恒为「摇曳的迷宫」，
+    //   子区域约每 6s 自转（崩坏域→宝物殿→幽玄域）。导航 = FarmMazeEntry（见下）。
+    //   旧的「主城→活动→培育道具」导航（FarmHomeEntry/FarmGrowCard/FarmEventScroll*）
+    //   已【停用并从链中移除】：它会在活动页来回空滚 25 次到放弃（现场根因）。
+    //
+    // ProjectInterface 选项覆盖（★#54 重定★）：
+    //   FarmFight          -> 目标迷宫【行名】（识别项；选项「打哪个迷宫行」，target=行名/domain=域）
+    //   FarmDomainPick     -> 迷宫【域】数据节点（选项「打哪个迷宫域」）
+    //   FarmRetry.max_hit  -> 重复次数（单目标）
+    //   FarmBonusAnswer    -> 是否使用「迷宫加成点数」
+    // ============================================================================
+    //
+    // ★#54：farm 的目标模型修订为「按【域】选 +【行名】」★（#52 的「域 + 元素独立轴」被设备证伪）
+    // ============================================================================
+    // 真机现状（16448 实测，2026-10-14）：
+    //   · 入口【可达】：主城左侧轮播横幅「摇曳的迷宫」被 FarmMazeEntry 的 OCR/roi
+    //     命中并点击 → 确实进了迷宫页（不是入口问题）；
+    //   · 迷宫页**按「域」选**，每个域是一张**异质行列表**（行名自含【元素】/Lv../层）：
+    //       崩坏域：`临境域深渊之兽·极`（体力 0）/`·真`/`` + 18 行
+    //               `深层域{1,2,3}【元素】Lv{50,60,70}` + `通往深层之门`；
+    //       宝物域：6 行 `摇曳的迷宫宝物域【火/水/雷/风/光/暗】`；
+    //       幽玄域：10 行 `幽玄域【{1〜3}…{28〜30}层】`。
+    //     **没有 初级/中级/高级 难度档**；**元素不是独立轴**（是行名的一部分）。
+    //   ⇒ 目标 = 【域 + 行名】；行名匹配用【整行 + 末尾锚定】（严格式，绝不命中相邻行），
+    //     并容忍 OCR 丢 【元素】/Lv../层 片段（容错式只放宽「本行自己的片段」，见 side_impl）。
+    //     行名匹配接受「的迷宫」（游戏写法）与各域标记（临境域/深层域/幽玄域）。
+    // （#45 曾把 farm 声明为「能力缺口」（无法开打）；#52 重定、#54 修订后 farm **不再是
+    //   能力缺口** —— 它走【真导航 + 真开打】。agent 侧声明表 UNREACHABLE_FROM_MAIN_CITY
+    //   已只保留 raid（战阵之宴）；farm 的模型 / 选项 / 守卫见 scene.config.MAZE_*、
+    //   scene.options.derive_maze_*、tools/contract_hooks/hooks_52.py 与 hooks_54.py。）
+    // ============================================================================
+    "FarmEntry": {
+        // 别名入口：薄节点，直接跳统一分派器 SpecialEntry。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["SpecialEntry"]
+    },
+    "FarmDispatch": {
+        // 【种类分派器】只在当前副本种类=farm 时命中（见 agent/side_impl.py BatchModeRecognition）。
+        // 命中后按下面的 next 跑 farm 导航链；farm 链每个节点跑完都回 SpecialEntry，
+        // 由指挥官再评估（切目标 / 收工），形成「分派 -> farm -> 回分派」的循环。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "batch_mode",
+                "custom_recognition_param": { "kind": "farm" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": [
+            "FarmBonusAnswer",
+            "FarmRetry",
+            // 公共「挑战」（common.json）：编队页点挑战，[JumpBack] 等价于原 FarmChallenge。
+            "[JumpBack]PubChallenge",
+            "FarmBattleWait",
+            // ★顺序 = 优先级，绝不能乱★（farm 链修复·2026-09-29）：
+            //   1) FarmMazeEntry 最前：在【主城左侧轮播横幅】认出「摇曳的迷宫」就点它进迷宫页
+            //      （判据/点击见该节点注释：roi 限定左侧轮播位 + 点自身识别框 target:true）。
+            //      ★必须排在 FarmScroll 之前★：主城那面横幅写着「摇曳的迷宫」，含「的迷宫」，
+            //      若 FarmScroll 在前，会在主城误命中并把主城往下滑 → 永远进不去迷宫页。
+            //   2) FarmFight：迷宫页认出目标行【战斗】就开打（此时画面已是迷宫页）；
+            //   3) FarmScroll/Up：迷宫页向下/回滚找目标行；
+            //   4) FarmGrowCard / FarmEventScroll* / FarmHomeEntry 是【已停用】的旧
+            //      「主城→活动→培育道具」导航：已从本链移除、max_hit 收到 1。
+            //      旧判据「亲爱的冒险者」（活动页固定横幅）不再使用 → 绝不会再像过去那样
+            //      在活动页来回滑 25 次空转到放弃（现场根因，已由横幅导航取代）。
+            "FarmMazeEntry",
+            // ★#60★ 道具确认框（是否使用阿尔戈罗盘 / 阿戈尔罗盘）必须【先于】选行/开打
+            //   （FarmFight）与滚动（FarmScroll/FarmScrollUp）处理：弹框压屏时迷宫页标记
+            //   （`的迷宫` / `临境域` / `深层域`…）仍在 → FarmScroll 会一直命中、空滚到预算
+            //   用尽（真机实证 FarmScroll×15 → FarmScrollUp×7 → FarmWait）。放到 FarmFight/
+            //   FarmScroll 之前后，这一帧先被本节点接住（点【是】），再交回 FarmFight。
+            //   处置见节点定义（FarmItemConfirm）：点它自己的【是】框中心；
+            //   #60 运维裁决 verbatim「阿尔戈罗盘的可以点确认，无所谓道具消耗」= 可消耗道具。
+            "FarmItemConfirm",
+            "FarmFight",
+            "FarmScroll",
+            "FarmScrollUp",
+            // 结算推进（special 公共节点）：farm 次数点满后可能多出一局，
+            // 用它点掉「继续 / OK / QUESTRESULT / 升级」把画面推进（不记 farm 账本）。
+            "SpecialResultContinue",
+            "SpecialResultFallback",
+            "SpecialLevelUpContinue",
+            "FarmItemContinue",
+            "FarmRewardClose",
+            "FarmSkipConfirm",
+            // 公共跳过剧情（common.json）：[JumpBack] 等价于原借用 auto_push.PushSkipStory
+            // （原节点 next=["AutoPush"] 会把管线甩进主线分派器，是已知缺陷）。
+            "[JumpBack]PubSkipStory",
+            "FarmWait"
+        ]
+    },
+    "FarmMazeEntry": {
+        // 【farm 唯一入口】主城左侧【轮播横幅】：轮播到「摇曳的迷宫」时点它进迷宫页。
+        // 实测（16448）：横幅标题恒为「摇曳的迷宫」，子区域约每 6s 自转
+        //（崩坏域→宝物殿→幽玄域，标题不变）；整条轮播约 30~40s 才轮到迷宫一次，
+        // 故本节点每轮都会重试（OCR 很轻），命中即点击（★有界重试见下 max_hit★）→ 进迷宫页后
+        // 本 roi 不再命中，交棒给 FarmFight/FarmScroll。
+        // ★点击用 target:true（点自身识别框中心），绝不用「识别框+死偏移」★。
+        // ★判据精确 + roi 限定左侧轮播位（720 [0,760,340,315]）★：
+        //   · expected 用「摇曳的迷宫」（兼容 OCR 常见截断/繁体：摇曳的迷 / 迷宮 / 搖曳）；
+        //     「摇曳」是这面横幅独有的词，roi 内其它文字不会命中。
+        //   · roi 只覆盖主城左侧轮播位；迷宫页顶部的「摇曳的迷宫」标题在 y≈205，
+        //     不在本 roi 内 → 本节点绝不在迷宫页误触发（避免反复点标题空转）。
+        // ★识别不到不空转：本节点只做一次轻量 OCR，绝不滑动/连续点击；旧「活动→培育道具」
+        //   的 25 次空滚已于本文件删除（见 FarmDispatch 注释）★。
+        // ★#57★ 判据改为【标题 ∧ 域】的与门 —— 域由**图片模板**判定，不再用 OCR：
+        //   · all_of[0] = FarmMazeDomain：横幅上**域名美术字**的 TemplateMatch（按
+        //     「打哪个迷宫域 / 打哪个迷宫行」注入该域模板；基线默认 = 缺省域 宝物域）。
+        //     这是域的**唯一**判据 —— OCR 绝不参与判域（旧实现只认标题，点下去可能进
+        //     任意一个域：#57 缺陷）。
+        //   · all_of[1] = FarmMazeTitle：标题 OCR（**次要**信号），整句锚定「摇X的迷」，
+        //     容忍真机误读（摇电/摇拽/迷宮）。
+        //   box_index:0 -> 点横幅域名美术字本身（target:true，零偏移）。识别不到只是
+        //   「不点」（安全失败），绝不误进别的域。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["FarmMazeDomain", "FarmMazeTitle"], "box_index": 0 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        // ★#maze-entry 有界重试★：max_hit 1 -> 6（本票修「轮播会转走 → 唯一那次点空 →
+        //   永久跳过 → FarmDispatch ⇄ FarmWait 空转到超时」的缺陷）。
+        //   · max_hit:1 = 整个任务只允许【一次】命中。轮播子区域约每 6s 自转、整条 30~40s
+        //     才轮到迷宫一次，识别到→点击之间存在竞态：那唯一一次点空后，框架会**永久跳过**
+        //     本节点（命中数已达上限），于是再也进不去，只能空转到超时（现场根因）。
+        //   · 抬到 6 = **有界**（有限次数、绝不无限；不是 200/无限制）：每次重试都经
+        //     FarmDispatch 分派循环回到本节点、在**新鲜帧**上重新识别（与模板门控同帧），
+        //     命中（横幅正是声明的那个域）才点击；6 次足以覆盖轮播数个周期 + 点击竞态，
+        //     用尽即停。
+        //   · ★为什么不做 self-loop★：`tools/test_scene_unchanged._guard_nexts_home`（#9）
+        //     要求 farm 链每个节点的 next 一律回 SpecialEntry；重试靠 max_hit + 分派循环，
+        //     不靠自环（自环若与 max_hit 脱钩就成了无界 spin）。
+        //   · ★域仍由模板判★：识别（And[FarmMazeDomain 模板, FarmMazeTitle OCR 次要叶]）
+        //     与点击（box_index:0 / Click target:true）一律不变 —— #57 的域判定语义不动。
+        //   · ★用尽不是静默 spin★：批量路径由指挥官按【兜底导航上限】明确跳过并打印原因
+        //     （side_impl._FARM_NAV_DEADLINE_SEC，见该常量注释），绝不空转到任务超时。
+        "max_hit": 6,
+        "post_delay": 2500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmMazeDomain": {
+        // ★#57 新增：域【横幅模板】门控叶★ —— 不是入口节点，只作 FarmMazeEntry 的与门叶。
+        //   主城左侧轮播横幅上该域【域名美术字】的图片模板（MAA TemplateMatch）。
+        //   template 由「打哪个迷宫域 / 打哪个迷宫行」选项或批量清单按域注入
+        //   （scene.options._maze_template_override / side_impl._maze_domain_template_overrides；
+        //   基线默认 = 缺省域 宝物域）。
+        //   roi 限定左侧轮播位（720 [0,760,340,315]）：迷宫页页眉的域名美术字在 y≈150，
+        //   不在本 roi 内 -> 绝不在迷宫页误触发（避免反复点标题空转）。
+        //   threshold 0.8：真机同模板 ≥0.998、异域 / 其它轮播 banner ≤0.41（余量充足）。
+        //   图片识别取代 OCR 判域 -> 对横幅副标题的 OCR 误读（崩坏域→崩环域、
+        //   幽玄域→出立域）完全免疫。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": { "template": ["maze/domain_baowu_banner.png"], "roi": [0, 760, 340, 315], "threshold": 0.8 }
+        }
+    },
+    "FarmMazeTitle": {
+        // ★#57 新增：标题【次要】判据叶★ —— 只作 FarmMazeEntry 的与门叶。
+        //   整句锚定「摇X的迷」（X 容忍真机把「曳」读成「电 / 拽」；「迷宫 / 迷宮」均可）。
+        //   ★域【不是】由这里判定的★ —— 域一律由 FarmMazeDomain 的图片模板判；标题 OCR
+        //   读不出只会「不点」（安全失败），绝不会误进别的域。
+        //   ★注意★标题 OCR 本身**不足以**证明「在主城」：迷宫页同样可能把行名
+        //   「摇曳的迷宫宝物域【火】」读进本 roi。挡住「在迷宫页重复触发」的是与门里的
+        //   FarmMazeDomain（横幅域名模板，在迷宫页 ≤0.31 不命中，见 tools/test_maze_domain.py）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["摇[曳电拽]的迷"], "roi": [0, 760, 340, 315] }
+        }
+    },
+    "FarmDomainVerify": {
+        // ★#57 新增：进域后【复核】叶★ —— 不被任何 next 引用；作 FarmScroll/FarmScrollUp
+        //   的与门叶。迷宫页**页眉**该域域名美术字的图片模板（role=head，按域注入；
+        //   基线默认 = 缺省域 宝物域）。
+        //   语义：只有页眉确认「确实进了声明的那个域」才允许滚动继续找行；复核不过 ->
+        //   不滚动（拒绝在**错的域**上推进，绝不误操作 —— 与 #35/#42「绝不作用在错的
+        //   对象上」同纪律）。roi = 页眉带 720 [0,90,720,240]（固定、不随列表滚动）。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": { "template": ["maze/domain_baowu_head.png"], "roi": [0, 90, 720, 240], "threshold": 0.8 }
+        }
+    },
+    "FarmActivityGate": {
+        // 仅作 FarmGrowCard 的子识别：活动列表页独有的【固定横幅】（实测常驻，
+        // 不随列表滚动而移动）。用它把「培育道具」卡片的点击限制在【活动列表页】，
+        // 避免在【迷宫页】顶部那行同样写着「培育道具」的标题上误触发
+        //（迷宫页没有这条横幅 → 门控必然不成立）。
+        // 判据用整句、不用宽泛的「活动」二字（精确匹配）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["亲爱的冒险者", "这是今天的推荐任务"] }
+        }
+    },
+    "FarmGrowText": {
+        // 仅作 FarmGrowCard 的子识别：活动列表「每日关卡·摇曳的迷宫 培育道具」卡片上的
+        // 文本。实测 OCR 把它拆成「培育」+「道具」两个框，故用 ^培育$ 精确匹配
+        //（同时兼容整读成「培育道具」的情况）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^培育$", "^培育道具$"] }
+        }
+    },
+    "FarmGrowCard": {
+        // ★已停用（farm 链已移除本节点）★：旧的「活动列表【培育道具】卡片」导航。
+        // 现改走 FarmMazeEntry（主城左侧轮播横幅）。保留定义仅为兼容旧 override，
+        // max_hit 收到 1（旧值 3 / 批量被抬到 40）。
+        // ★点击用 target:true（点自己识别框中心），绝不用固定坐标/死偏移★。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["FarmActivityGate", "FarmGrowText"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "max_hit": 1,
+        "post_delay": 2500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmEventScrollDown": {
+        // ★已停用（farm 链已移除本节点）★：旧的「活动列表页向下滚找培育道具」。
+        // 保留定义仅为兼容旧 override，max_hit 收到 1（旧值 14 / 批量被抬到 40）；
+        // 判据仍是活动页固定横幅，主城/迷宫页都不会命中，已不可能再空滚 25 次。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["亲爱的冒险者", "这是今天的推荐任务"] }
+        },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 900], "end": [360, 700], "duration": 450 }
+        },
+        "max_hit": 1,
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmEventScrollUp": {
+        // ★已停用（farm 链已移除本节点）★：旧的「活动列表页回滚兜底」。
+        // 保留定义仅为兼容旧 override，max_hit 收到 1（旧值 6 / 批量被抬到 40）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["亲爱的冒险者", "这是今天的推荐任务"] }
+        },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 700], "end": [360, 900], "duration": 450 }
+        },
+        "max_hit": 1,
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmFight": {
+        // 迷宫列表：点目标迷宫那一行的【战斗】。
+        // ★P0 安全修复★：不再用「迷宫名识别框 + target_offset [-185,37]」——
+        //   迷宫列表里【战斗】(实测 720 y≈908) 与【推荐编成】(y≈944) 只差 36px，
+        //   迷宫名 OCR 框抖几像素落点就会掉进【推荐编成】，改掉用户队伍配置（破坏性）。
+        //   现由 custom「special_target_fight」按 pair="below" 直接返回该行【战斗】
+        //   自己的 OCR 框（点击=框中心、零偏移），点击必然落在【战斗】框内。
+        // ★#54★ 目标 = 【域 + 行名】：target = 行名（自含【元素】/Lv../层），domain = 域。
+        //   由「打哪个迷宫行」选项 / 批量清单经 override 注入（见 _farm_override）。
+        //   识别器按行名匹配（严格式优先、容错式兜底：容忍丢 片段，但绝不命中相邻行），
+        //   并把命中的【战斗】框回指到**声明的那个行**证明归属（#35 同构）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "special_target_fight",
+                "custom_recognition_param": { "target": "摇曳的迷宫宝物域【火】", "domain": "宝物域", "pair": "below" }
+            }
+        },
+        "action": {
+            "type": "Click",
+            "param": { "target": true }
+        },
+        "max_hit": 1,
+        "post_delay": 2500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmDomainPick": {
+        // ★#54 新增：迷宫【域】数据节点★（不在任何 next 里、永不执行）。
+        //   GUI「打哪个迷宫域」与批量清单的域字段都写进本节点；与 FarmFight 的 domain 互补
+        //   （FarmFight 的 target 行名本身已暗含域，domain 只是显式声明 / 回退用）。
+        //   本节点自身不做任何识别/动作，只是「配置为真源」下域选择的唯一落点。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "special_target_fight",
+                "custom_recognition_param": { "domain": "宝物域", "pair": "below" }
+            }
+        }
+    },
+    "FarmScroll": {
+        // 迷宫页：未找到目标行时向下滚动继续找（覆盖三域的各行）。
+        // 判据用【迷宫页标记】：★#54★ 现版本迷宫页标题是「摇曳的迷宫」+ 域标记
+        //   （崩坏域 / 宝物域 / 幽玄域），行名形态有「摇曳的迷宫宝物域【X】」（的迷宫）、
+        //   「临境域…」/「深层域…」（崩坏域）、「幽玄域【a〜b层】」（幽玄域）。故 expected
+        //   同时接受 的迷宫/的迷宮（游戏写法；标题有「的」、宝物域页标题偶读繁体「迷宮」）
+        //   与三域 / 行首标记。旧的「之迷宫」在真机上一个也匹配不到，故绝不用。
+        // ★绝不加回「首次报酬」★：它同时出现在迷宫【结算/首通奖励】弹窗上，
+        //   会让本节点在结算页抢先命中、把结算推进节点整条饿死（实测踩过：
+        //   战斗结束后反复 FarmScroll 空滚、收工失败）。
+        // 迷宫列表较短（各域 / 各行若干），1~2 步即到目标；max_hit:10（批量 40）
+        // = 终止条件；目标行一进入视野，FarmFight（更靠前）先命中。
+        "recognition": {
+            // ★#57★ 迷宫页滚动只在【页眉确认进了声明的域】时进行（And；域由图片模板判，
+            //   见 FarmDomainVerify）。复核不过 -> 不滚动（拒绝在**错的域**上推进）。
+            //   OCR 叶只认「迷宫页」标记，**不判域**。
+            "type": "And",
+            "param": {
+                "all_of": [
+                    "FarmDomainVerify",
+                    { "recognition": { "type": "OCR", "param": { "expected": ["的迷宫", "的迷宮", "临境域", "深层域", "幽玄域", "崩坏域", "通往深层之门"] } } }
+                ],
+                "box_index": 0
+            }
+        },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 900], "end": [360, 700], "duration": 450 }
+        },
+        "max_hit": 10,
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmScrollUp": {
+        // 迷宫页：滚过头后回滚查找（兜底）。排在 FarmScroll 之后，自身也有界。
+        // 判据同 FarmScroll（★#54★：三域页标记 + 行首标记；游戏写**的**迷宫 / 偶读**迷宮**）。
+        "recognition": {
+            // ★#57★ 迷宫页滚动只在【页眉确认进了声明的域】时进行（And；域由图片模板判，
+            //   见 FarmDomainVerify）。复核不过 -> 不滚动（拒绝在**错的域**上推进）。
+            //   OCR 叶只认「迷宫页」标记，**不判域**。
+            "type": "And",
+            "param": {
+                "all_of": [
+                    "FarmDomainVerify",
+                    { "recognition": { "type": "OCR", "param": { "expected": ["的迷宫", "的迷宮", "临境域", "深层域", "幽玄域", "崩坏域", "通往深层之门"] } } }
+                ],
+                "box_index": 0
+            }
+        },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 700], "end": [360, 900], "duration": 450 }
+        },
+        "max_hit": 6,
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmBonusAnswer": {
+        // 「迷宫加成点数」弹窗：默认点「否」（选项可覆盖为「是」）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["迷宫加成点数"] }
+        },
+        "action": { "type": "Click", "param": { "target": [196, 823] } },
+        "post_delay": 2000,
+        "next": ["SpecialEntry"]
+    },
+    "FarmBattleWait": {
+        // 战斗中：判据收敛到 common.json 的 PubBattleTime/PubBattleScore
+        // （And：时间 \d+:\d+ + 分数 \d）。
+        // ★绝不改回裸「时间」「分数」：结算页「战斗分数」「最长滞空时间6秒」会误命中 → 空等死循环★
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubBattleTime", "PubBattleScore"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 5000,
+        "next": ["SpecialEntry"]
+    },
+    "FarmRetry": {
+        // 结算页：再次挑战（单目标模式下 max_hit 由「刷几次」选项覆盖；
+        // 批量模式下由指挥官改成 custom「special_batch_finish」(record=always) 并设 max_hit）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["再次挑战"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "max_hit": 10,
+        "post_delay": 3000,
+        "next": ["SpecialEntry"]
+    },
+    // ---- 弹窗处理：原先是跨文件借用 auto_push.json 的 Push* 节点（next=AutoPush，
+    //      会把管线甩进主线分派器）。现改为本文件自包含的本地节点，next 一律 SpecialEntry。----
+    "FarmItemContinue": {
+        // 「获得道具」弹窗：点底部「继续」（720 (358,1198)）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["获得道具"] }
+        },
+        "action": { "type": "Click", "param": { "target": [358, 1198] } },
+        "post_delay": 1200,
+        "next": ["SpecialEntry"]
+    },
+    "FarmRewardClose": {
+        // 奖励弹窗：点「关闭」
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^关闭$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1200,
+        "next": ["SpecialEntry"]
+    },
+    "FarmSkipConfirm": {
+        // 跳过二次确认：点「跳过」（roi 限定下半屏，避开剧情页右上角「跳过>」）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^跳过$"], "roi": [0, 600, 720, 600] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "FarmWait": {
+        // 兜底等待（加载/过场）
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": ["SpecialEntry"]
+    },
+    // ============================================================================
+    // ★#60 迷宫道具确认框（是否使用阿尔戈罗盘 / 阿戈尔罗盘）★
+    // ============================================================================
+    // 缺陷（真机 16448；证据帧 OCR 见 tools/contract_hooks/hooks_60.py 的
+    // POPUP_FRAME_ITEMS，逐条内嵌自 mazeA_beng_ji_99_end.ocr.txt）：
+    //   迷宫行【战斗】（FarmFight）点下去会弹一张**模态确认框**：
+    //       「是否使用阿尔戈罗盘」/「挑战临境域 深渊之兽·极？」  否@[178,806] 是@[504,805]
+    //   farm 链此前**没有任何节点**处理它（FarmBonusAnswer 只认「迷宫加成点数」），
+    //   于是卡在 FarmScroll×15 → FarmScrollUp×7 → FarmWait，战斗从未开始。
+    //
+    // 处置（#60 运维裁决 verbatim）：「阿尔戈罗盘的可以点确认，无所谓道具消耗」——
+    //   即【点【是】】，**允许消耗道具**（弹框写明「使用的道具将在通关后被扣除」）。
+    //
+    // 为什么是【数据声明】而不是硬编码坐标（#35/#42/#57 同纪律）：
+    //   · 判据 / 落点全在 pipeline 数据里（本文件即数据），不写死在 agent 代码里；
+    //   · 动作是 `Click target:true` = 点**识别框中心**，而识别框由 box_index 指到
+    //     【是】自己的 OCR 框 → 点的是【是】框中心，**零死偏移**（绝不写死 (522,823)）；
+    //   · ★OCR 变体★：设备把该道具读成「阿尔戈罗盘」与「阿戈尔罗盘」两种（#60 证据），
+    //     故标题判据用 `是否使用阿[尔戈]{1,2}罗盘` —— 中间两字的**顺序/多寡**都容忍，
+    //     但仍是这一个弹框独有的词（「罗盘」+「是否使用」不会在别的页面同现）。
+    //
+    // 顺序（安全属性）：本节点在 FarmDispatch 链里排在 FarmFight / FarmScroll 之前
+    //   （见该链注释）—— 弹框帧先被它接住，再交回 FarmFight 开打。
+    // 守卫 + prove-red 见 tools/contract_hooks/hooks_60.py（#64 的归位侧见 hooks_64.py）。
+    // ============================================================================
+    "FarmItemConfirmPrompt": {
+        // 仅作 FarmItemConfirm 的与门叶：道具确认框【标题】。
+        // ★容忍 OCR 变体★（阿尔戈罗盘 / 阿戈尔罗盘）：`阿[尔戈]{1,2}罗盘`。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["是否使用阿[尔戈]{1,2}罗盘"] }
+        }
+    },
+    "FarmItemConfirmYes": {
+        // 仅作 FarmItemConfirm 的与门叶：【是】按钮（读它自己的 OCR 框 → 点框中心）。
+        // 用 `^是$` 两端锚定：标题「是否使用…」里的「是」不会被误命中（那整行文本不是单字「是」）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^是$"] }
+        }
+    },
+    "FarmItemConfirm": {
+        // 【道具确认框 -> 点【是】】一次（#60）：与门=标题 ∧ 【是】按钮；
+        //   box_index:1 -> 整体识别框 = 【是】自己的框；动作 target:true -> 点该框中心。
+        // max_hit 不设：弹框每次开打各弹一次，不限次（每次都要确认）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["FarmItemConfirmPrompt", "FarmItemConfirmYes"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    }
+}

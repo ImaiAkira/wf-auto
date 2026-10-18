@@ -1,0 +1,331 @@
+name: install
+
+env:
+  # 版本控制：
+  # - 设置为具体 release tag 时下载指定版本；留空则下载 latest（本仓不允许留空）。
+  # - 两个 pin 都是 **上游 release 的 tag（带 v 前缀）**，不是裸语义版本号：
+  #   robinraju/release-downloader 用 tag 精确定位 release，写 "5.13.1" 会 404。
+  #
+  # MAAFW_VERSION 必须与 tools/requirements-agent.txt 的 maafw 版本一致（当前
+  # maafw==5.13.1）。GUI 侧的 MaaFramework 来自这个 release（最终落进
+  # install/runtimes/win-x64/native/），agent 侧来自便携 Python 里的 pip wheel；
+  # 两边版本必须相同，否则 GUI 与 agent 各加载一个 MaaFramework.dll。升级 maafw
+  # 时这里必须一起升。
+  MAAFW_VERSION: "v5.13.1"
+  # MFAAvalonia 是第三方通用 GUI 外壳（framework-dependent，net10.0 / win-x64）。
+  # v2.16.1 是 install/ 里当前实测过的那一版：MFAAvalonia.exe 的 commit
+  # 4f11c812 就是 v2.16.1 的 tag commit。升级前先确认它与 MAAFW_VERSION 兼容。
+  MFAA_VERSION: "v2.16.1"
+  # 便携 Python 的来源：python-build-standalone 的 release tag（日期）+ 3.13 的
+  # install_only 包。install_only 解压后自带顶层 python/ 目录，正好 = install/python。
+  # fileName 用通配是为了跟住 3.13 的补丁版本（asset 名里带 +<日期>，不好硬编码）。
+  PORTABLE_PYTHON_RELEASE: "20261013"
+  PORTABLE_PYTHON_ASSET: "cpython-3.13.*-x86_64-pc-windows-msvc-install_only.tar.gz"
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - "**"
+    paths:
+      - ".github/workflows/install.yml"
+      - "assets/**"
+      - "**.py"
+  pull_request:
+    branches:
+      - "**"
+    paths:
+      - ".github/workflows/install.yml"
+      - "assets/**"
+      - "**.py"
+  workflow_dispatch:
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: set_tag
+        run: |
+          # 检查标签格式
+          is_release=${{ startsWith(github.ref, 'refs/tags/v') }}
+          tag=$(git describe --tags --match "v*" ${{ github.ref }} || true)
+          if [[ $tag != v* ]]; then
+            tag=$(curl -sX GET "https://api.github.com/repos/${{ github.repository }}/releases/latest" --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' | awk '/tag_name/{print $4}' FS='["]')
+            if [[ $tag != v* ]]; then
+              tag="v0.0.0"
+            fi
+            tag=$(date "+$tag-%y%m%d-$(git rev-parse --short HEAD)")
+          fi
+
+          if ! $($is_release) ; then
+            prefix=${tag%-*-*}
+            suffix=${tag#$prefix-}
+            tag="$prefix-ci.$suffix"
+          fi
+
+          # 检查是否为预发布版本
+          is_prerelease=false
+          if [[ $tag =~ .*alpha.* || $tag =~ .*beta.* || $tag =~ .*rc.* || $tag =~ .*dev.* || $tag =~ .*-ci.* ]]; then
+            is_prerelease=true
+            echo "This is a pre-release version"
+          fi
+
+          echo tag=$tag | tee -a $GITHUB_OUTPUT
+          echo is_release=$is_release | tee -a $GITHUB_OUTPUT
+          echo is_prerelease=$is_prerelease | tee -a $GITHUB_OUTPUT
+    outputs:
+      tag: ${{ steps.set_tag.outputs.tag }}
+      is_release: ${{ steps.set_tag.outputs.is_release }}
+      is_prerelease: ${{ steps.set_tag.outputs.is_prerelease }}
+
+  install:
+    needs: meta
+    # 本期只保证 Windows（docs/spec/public-release.md D5）：矩阵从
+    # os×arch 8 格收敛为 win × x86_64 单格。macos / linux / android 的安装路径
+    # 没有 CI 验证，不再假装支持。
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: win
+            arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # 构建解释器：只跑 tools/*.py（install.py / fill_interface.py 需要
+      # json-with-comments）。它与下面塞进发布包的便携 Python 是两回事。
+      - name: Set up build Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 便携 Python 必须在 install.py **之前**就位：
+      # install/python 是 .gitignore 掉的本地产物，CI 上不存在；install.py 的
+      # install_python() 在 Windows 上看不到 install/python/python.exe 会直接
+      # exit 1（宁可失败，也不发出一个 agent 起不来的包，见 #133）。
+      # install_only 包解压后自带顶层 python/ 目录，所以 extract-path 直接写 install。
+      - name: Create install staging directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path install | Out-Null
+
+      - name: Download portable Python (python-build-standalone)
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: astral-sh/python-build-standalone
+          tag: ${{ env.PORTABLE_PYTHON_RELEASE }}
+          fileName: ${{ env.PORTABLE_PYTHON_ASSET }}
+          out-file-path: "."
+          extract: true
+          extract-path: "install"
+
+      - name: Install agent dependencies into the portable Python
+        shell: bash
+        run: |
+          test -f install/python/python.exe
+          install/python/python.exe -V
+          # install_only 一般自带 pip；万一没有就现场 ensurepip 一次，报错也比
+          # 「后面某步莫名 ModuleNotFoundError」清楚。
+          if ! install/python/python.exe -m pip --version; then
+            install/python/python.exe -m ensurepip --upgrade
+          fi
+          # 与 tools/requirements-agent.txt 对齐（maa==5.13.1 / MaaAgentBinary /
+          # numpy / StrEnum）。--target 是这套包约定的安装方式（#133 已验证）。
+          install/python/python.exe -m pip install \
+            --disable-pip-version-check \
+            --no-warn-script-location \
+            --target install/python/Lib/site-packages \
+            -r tools/requirements-agent.txt
+
+      - name: Smoke test portable Python
+        shell: bash
+        run: |
+          # 非 0 直接 fail：agent 的 child_exec 就是 install/python/python.exe。
+          install/python/python.exe -c "import maa, numpy; print('portable python OK')"
+
+      - name: Download MaaFramework
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: MaaXYZ/MaaFramework
+          fileName: "MAA-${{ matrix.os }}-${{ matrix.arch }}*"
+          latest: ${{ env.MAAFW_VERSION == '' }}
+          tag: ${{ env.MAAFW_VERSION }}
+          out-file-path: "deps"
+          extract: true
+
+      - name: Download MFAAvalonia
+        id: download_mfa
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: SweetSmellFox/MFAAvalonia
+          fileName: "MFAAvalonia-*-win-x64*"
+          latest: ${{ env.MFAA_VERSION == '' }}
+          tag: ${{ env.MFAA_VERSION }}
+          out-file-path: "MFA"
+          extract: true
+
+      # Windows runner 上不能用 bash 里拼出来的反斜杠路径（反斜杠会被 bash 当转义），
+      # 所以清理/删除这两步统一用 pwsh。
+      - name: Clean up MFAAvalonia archive
+        shell: pwsh
+        run: |
+          $archive = '${{ fromJson(steps.download_mfa.outputs.downloaded_files)[0] }}'
+          if (Test-Path -LiteralPath $archive) {
+            Remove-Item -LiteralPath $archive -Force
+            Write-Host "Removed $archive"
+          } else {
+            Write-Host "Archive already gone: $archive"
+          }
+
+      # 删掉 MFA 自带的 MaaFramework，让包里只剩 deps/ 那一份（版本由
+      # MAAFW_VERSION 决定），避免 GUI 侧出现两个版本。
+      - name: Remove built-in runtime in MFA
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "MFA/runtimes") {
+            Remove-Item -LiteralPath "MFA/runtimes" -Recurse -Force
+            Write-Host "Removed MFA/runtimes"
+          } else {
+            Write-Host "MFA/runtimes not present, nothing to remove"
+          }
+
+      - name: Install
+        shell: pwsh
+        run: |
+          # MFAAvalonia 层：模板原本用 `rsync --ignore-existing`，Windows runner 不保证
+          # 有 rsync，改成 PowerShell 复制。此刻 install/ 里只有 python/，与 MFA 无重名。
+          # MFA 下载失败时直接报错，不要静默产出一个没有 GUI 的包。
+          if (-not (Test-Path -LiteralPath "MFA")) {
+            throw "MFA directory not found: the MFAAvalonia download step failed"
+          }
+          New-Item -ItemType Directory -Force -Path "install" | Out-Null
+          Copy-Item -Path "MFA\*" -Destination "install" -Recurse -Force
+
+          python -m pip install --disable-pip-version-check -r tools/requirements.txt
+
+          # 版本真源 = tag（docs/spec/public-release.md D6）：先用 fill_interface
+          # 把 tag 写进 assets/interface.json（保注释 / 保 CRLF / 幂等），再让
+          # install.py 复制它。必须在 install.py **之前**。
+          python tools/fill_interface.py --version "${{ needs.meta.outputs.tag }}"
+
+          python tools/install.py "${{ needs.meta.outputs.tag }}" "${{ matrix.os }}" "${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wf-auto-${{ matrix.os }}-${{ matrix.arch }}
+          path: "install"
+          if-no-files-found: error
+          # 让 install/config/.gitkeep 也进 artifact：zip 不保存空目录，丢了它
+          # config/ 就不会出现在发布包里（MFAAvalonia 首次运行会自己建，但
+          # 「解压后目录结构齐全」更符合预期）。install/ 下没有其它隐藏文件。
+          include-hidden-files: true
+
+  changelog:
+    name: Generate changelog
+    needs: meta
+    runs-on: ubuntu-latest
+    outputs:
+      release_body: ${{ steps.git-cliff.outputs.content }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate a changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: .github/cliff.toml
+          # 正式版：使用 tag-pattern 只匹配正式版标签，包含所有从上一个正式版以来的提交
+          # 预发布版：正常生成，只包含从上一个标签以来的提交
+          args: >-
+            -vv --latest --strip header
+            ${{ needs.meta.outputs.is_prerelease == 'false' && '--tag-pattern "^v[0-9]+\\.[0-9]+\\.[0-9]+$"' || '' }}
+        env:
+          OUTPUT: CHANGES.md
+          GITHUB_REPO: ${{ github.repository }}
+
+  release:
+    if: ${{ needs.meta.outputs.is_release == 'true' }}
+    needs: [meta, install, changelog]
+    runs-on: ubuntu-latest
+    # softprops/action-gh-release 要写 release；显式声明，避免仓库默认只读时静默失败。
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          cd assets
+          # 压缩包根 = 每个 artifact 目录的内容（不套同名目录），这样解压后直接就是
+          # install/ 的内容，对应 README 的「解压到任意目录 → 双击 双击启动.bat」。
+          # 不要改成 `zip -r ../$f.zip $f`，那会多套一层同名目录。
+          for f in *; do
+            (cd "$f" && zip -r "../$f-${{ needs.meta.outputs.tag }}.zip" .)
+          done
+
+      # 资产名与 README 第 1 步的下载名必须一致：wf-auto-win-x86_64-<tag>.zip。
+      # 同时校验 zip 根是 install/ 的内容，且用户双击/启动所需的文件真的在里面。
+      - name: Verify release asset name and zip root
+        shell: bash
+        run: |
+          expected="assets/wf-auto-win-x86_64-${{ needs.meta.outputs.tag }}.zip"
+          if [ ! -f "$expected" ]; then
+            echo "::error::missing release asset: $expected"
+            ls -la assets
+            exit 1
+          fi
+          entries="$RUNNER_TEMP/release-zip-entries.txt"
+          unzip -Z1 "$expected" > "$entries"
+          if grep -qE '^(\./)?wf-auto-win-x86_64/' "$entries"; then
+            echo "::error::zip 多套了一层目录：解压后还要再进一层，破坏「解压即用」"
+            exit 1
+          fi
+          check_entry() {
+            if ! grep -qxE "$2" "$entries"; then
+              echo "::error::release zip 缺少 $1"
+              exit 1
+            fi
+          }
+          check_entry "MFAAvalonia.exe" '^(\./)?MFAAvalonia\.exe$'
+          check_entry "python/python.exe" '^(\./)?python/python\.exe$'
+          check_entry "interface.json" '^(\./)?interface\.json$'
+          check_entry "agent/main.py" '^(\./)?agent/main\.py$'
+          check_entry "runtimes/win-x64/native/MaaFramework.dll" '^(\./)?runtimes/win-x64/native/MaaFramework\.dll$'
+          # 用户实际双击的那两个文件：缺了「解压 → 双击」这条主路径就断了。
+          check_entry "双击启动.bat" '^(\./)?双击启动\.bat$'
+          check_entry "DependencySetup_依赖库安装_win.bat" '^(\./)?DependencySetup_依赖库安装_win\.bat$'
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*.zip
+          tag_name: ${{ needs.meta.outputs.tag }}
+          body: ${{ needs.changelog.outputs.release_body }}
+          draft: false
+          prerelease: ${{ needs.meta.outputs.is_prerelease == 'true' }}
+
+        # Mirror酱为第三方分发服务，新项目默认关闭
+        # 若有需要请联系 Mirror酱 开通，直接自行开启是无法使用的
+        # https://mirrorchyan.com/
+      - name: Trigger MirrorChyanUploading
+        if: false
+        # 需向 Mirror 酱申请真实 rid 并开通后才能开启；开启时把 if 换成
+        # `if: ${{ github.repository_owner == 'ImaiAkira' }}`
+        shell: bash
+        run: |
+          gh workflow run --repo $GITHUB_REPOSITORY mirrorchyan_release.yml -f tag=${{ needs.meta.outputs.tag }}
+          gh workflow run --repo $GITHUB_REPOSITORY mirrorchyan_release_note.yml -f tag=${{ needs.meta.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
