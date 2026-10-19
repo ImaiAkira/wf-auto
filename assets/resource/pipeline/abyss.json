@@ -1,0 +1,718 @@
+{
+    // ==========================================================================
+    // 自动刷深渊EX（深渊连战EX）—— 入口：AbyssEntry（#55 Phase 2）
+    //
+    // 【铁律 1：本文件必须自包含】不复用其它 pipeline 文件的节点；所有节点 next 一律回
+    //   AbyssEntry（除 StopTask 出口）。本文件**不**接入 special_dungeon.json 的分派器
+    //   （那条是领主战族/幻想/战阵/迷宫的批量链），深渊EX 是**第二条配置类**（scenario）。
+    //
+    // 【铁律 2：状态机】每个动作节点都由自定义识别 abyss_state 精确门控：只有当前画面确实
+    //   是该状态时节点才命中。动作由自定义动作 abyss_act 执行：它【直接 OCR 目标按钮文字
+    //   本身】再点（绝不用识别框+死偏移猜按钮），点完重新截图校验画面推进。
+    //
+    // 【铁律 3：安全红线】
+    //   · 绝不 KeyEvent 4；返回一律用屏幕按钮。
+    //   · 绝不用「识别框 + 死偏移」猜按钮 → abyss_act 只点 OCR 到的按钮中心。
+    //   · 换日重进文案未实测到：只做【整句】匹配（默认「请重新启动游戏」），识别不了交给卡死兜底。
+    //
+    // 【铁律 4：出口】连续认不出画面超过 lost_sec（ADR 0005）先【归位重导航】最多 2 次
+    //   （#21）→ 用尽才 AbyssGiveUp 优雅收工；长时间无新关卡 / 阶梯记账异常 → 直接收工；
+    //   画面冻结 → AbyssStall 强杀重开。
+    //   ★没有「刷几套」节点★（运维：不关心有几套）：
+    //   深渊是 30 层线性阶梯，一直往下刷；第 30 战打完游戏自己跳回关卡选择页，继续即可。
+    //
+    // ★全单人（无共斗）★：运维明确「深渊EX 只有单人，没有共斗」；本文件**不含**任何
+    //   AbyssCoop* / 招募 / 建立房间 / 多人 节点（memo §5 亦拒绝为未证实的复杂度买单）。
+    //
+    // ★导航：数据驱动地搜三个二级页签★（运维澄清 2026-10-14）
+    //   主城 → 活动 → 终始之战 → 【在「未通关/已通关/完成」里搜目标横幅】→ hub → 战斗
+    //   → 确认框 OK → 关卡选择页 → 点关卡条 → 单人编队 → 挑战 → 战斗 → 结算。
+    //   · 页签**不固定**（随账号进度变）：AbyssNavBanner（模板匹配）排在 AbyssNavTab 之前，
+    //     当前页签能看到目标横幅就直接进入；看不到才 AbyssNavTab 切下一个页签（列表来自
+    //     scene.abyss.ZHONGSHI_TABS，数据化）。横幅在多个页签同时可见时，先撞见哪个用哪个。
+    //   · 横幅判据用【模板匹配】（banner_abyss_ex.png）而非 OCR：艺术字 OCR 不可靠，且
+    //     「深渊连战」⊂「深渊连战EX」子串歧义。阈值 0.90 > 纯深渊横幅的假阳分 0.8708。
+    //   · 幻想连战 / 深渊 / 深渊EX 共用这条「活动 → 终始之战 → 搜页签」导航（数据同源）。
+    //   · ★#117 页签校验不许自证 + 空态必须收工★（真机 384 2026-10-18 08:0x）：
+    //     终始之战页三个页签全空时，旧 `expect: ["zhongshi"]` 判据恒成立 ⇒「未通关/已通关/完成」
+    //     三连无限重复。现在 AbyssNavTab 只认 validate=content_change（点完**内容区文本集合必须变**），
+    //     失败重试 1 轮（retry_limit）后带原因收工；扫满 2 轮（scan_rounds）没找到横幅也带原因收工。
+    //     三个页签都确认「没有相关的活动」⇒ AbyssGiveUp 报「终始之战没有可打的关卡（三个页签均无内容）」。
+    //     证据帧：tools/frames/abyss_zhongshi_tabs.png（+ 同名 .ocr.txt 侧车）。
+    //
+    // ★普通深渊（#55 Phase 3）★：运维「深渊和深渊EX 只有导航的区别」。
+    //   · 共用【同一份实现】（agent/abyss_impl.py 按场景 id 参数化）+【同一条流水线】：
+    //     hub / 关卡选择 / 单人编队 / 结算 / 战斗 / 页签搜索逐处共用（不 fork 状态机）；
+    //   · 差异只有【横幅模板 + 进关确认文案 + 账本范围】：AbyssPlainEntry 声明活动场景
+    //     `abyss_plain` → 共享节点取它（账本 abyss_plain）、AbyssBannerPlain 用
+    //     banner_abyss_plain.png（阈值 0.90 > EX 模板对纯深渊横幅的假阳分 0.8708）、确认文案去 EX；
+    //   · ★场景门控 AbyssSceneEx / AbyssScenePlain★：普通深渊任务【不】误点「未通关」页签里
+    //     可见的 EX 横幅（两条横幅美术几乎一样；页签 + 专属模板 + 场景门控三重区分）。
+    // ==========================================================================
+    "AbyssEntry": {
+        "next": [
+                    "AbyssLevelRequired",
+                    "AbyssLevelRequiredNative",
+                    "AbyssGiveUp",
+                    // ★#21 / ADR 0005 第 4 条：GiveUp + Recover 成对，索引 2/3★
+                    //   先由 GiveUp 判「该归位还是该收工」：预算还有就只置 recover_pending、
+                    //   返回不命中；紧跟着的 AbyssRecover 是【旗标门控】—— 只有 recover_pending
+                    //   为真且当前帧仍 unknown 才命中，正常帧恒不命中 ⇒ 不存在抢帧
+                    //   （#29 的教训针对的是页面识别类节点，不是这种旗标门控）。
+                    //   ★AbyssGiveUp 绝不许挪到链尾★：AbyssNavTab 在 zhongshi 页每轮恒命中，
+                    //   GiveUp 一旦排到业务节点之后，request_giveup 就永远没人消费 →
+                    //   #117 的「三个空页签无限空转」复活。
+                    "AbyssRecover",
+                    "AbyssStall",
+                    "[JumpBack]PubDailyPopup",
+                    "[JumpBack]PubGameOverGiveUp",
+                    "[JumpBack]PubGameOverConfirm",
+                    "AbyssReconnect",
+                    "[JumpBack]PubLoginContinue",
+                    "[JumpBack]PubTitleStart",
+                    "AbyssLoading",
+                    "AbyssRelogin",
+                    "[JumpBack]PubSkipStory",
+                    "[JumpBack]PubNewCharTap",
+                    "AbyssBattleWait",
+                    "AbyssSettleContinueChallenge",
+                    "AbyssSettleFallback",
+                    "[JumpBack]PubQuestResult",
+                    "AbyssMainFight",
+                    "AbyssTeamAutoSet",
+                    "AbyssSoloChallenge",
+                    "AbyssEnterConfirm",
+                    // ★普通深渊的确认框（场景门控只在 abyss_plain 任务命中）★，紧随 EX 确认框。
+                    "AbyssPlainEnterConfirm",
+                    "AbyssHubEnter",
+                    // ★导航组：横幅（模板匹配）必须在切页签之前★ —— 当前页签可见就进入，
+                    //   看不到才 AbyssNavTab 切下一个（页签列表来自 scene.abyss，数据化）。
+                    //   EX 横幅 → 普通深渊横幅（各自场景门控）→ 都看不到才切页签。
+                    "AbyssNavBanner",
+                    "AbyssPlainNavBanner",
+                    "AbyssNavTab",
+                    "AbyssNavZhongshi",
+                    "AbyssNavActivity",
+                    // ★归位（兜底型）排在最后、AbyssWait 之前★：#18/#29 的教训是兜底只做
+                    //   最低优先级回退，绝不抢在链上各步之前命中去点主城。
+                    // ★「体力不足 → 星岛石恢复」★（scene/stamina.py 是真源）：深渊「挑战」消耗体力，
+                    //   不足时游戏弹回复体力弹窗 —— 共享节点「先点星导石行、再点确认框 OK」（只用星岛石）。
+                    // ★#102 P0-1★ 第一步的**模板优先**通道（真源 scene/stamina.py::RECOVERY_STEPS）：
+                    //   与下面那条 OCR 版是同一动作（点星导石行框中心），只差行判据；
+                    //   必须排在 OCR 版**之前**（next 是有序候选，先命中先执行）。
+                    "[JumpBack]PubStaminaUseStoneTpl",
+                    "[JumpBack]PubStaminaUseStone",
+                    "[JumpBack]PubStaminaConfirmOk",
+                    "[JumpBack]PubStaminaDoneOk",
+                    "[JumpBack]PubReturnHome",
+                    "AbyssWait"
+                ]
+    },
+
+    // ------------------------------------------------- 原生点击辅助（被 run_action 调用）
+    "AbyssClick": {
+        // 只作为「原生 Click 动作」入口，由 agent 的 abyss_act 通过
+        // context.run_action("AbyssClick", box=...) 调用。★不设 max_hit★（一次任务要点成百上千次）。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "Click", "param": { "target": true } }
+    },
+
+    // ------------------------------------ 场景声明 / 门控（#55 Phase 3：普通深渊 = 同实现 + 数据）
+    // ★为什么不 fork★：普通深渊与深渊EX 共用这条流水线（hub/main/编队/结算/战斗/页签搜索逐处
+    //   同形）；差异只在横幅模板 / 确认文案 / 账本范围。场景 id 从 scene.abyss.SCENARIOS 来，
+    //   由入口节点声明，共享节点取【活动场景】（abyss_impl 的 _ACTIVE_SCENE）。
+    "AbyssSceneEx": {
+        // 场景门控叶：仅当活动场景 == abyss（深渊EX）时命中。★防止普通深渊任务误点 EX 横幅★
+        //   （EX 横幅常在「未通关」页签可见，两条横幅美术几乎一样）。
+        "recognition": {
+            "type": "Custom",
+            "param": { "custom_recognition": "abyss_scene", "custom_recognition_param": { "scene": "abyss" } }
+        }
+    },
+    "AbyssScenePlain": {
+        // 场景门控叶：仅当活动场景 == abyss_plain（普通深渊）时命中。
+        "recognition": {
+            "type": "Custom",
+            "param": { "custom_recognition": "abyss_scene", "custom_recognition_param": { "scene": "abyss_plain" } }
+        }
+    },
+    "AbyssPlainEntry": {
+        // 【普通深渊 · 任务入口】声明活动场景 = abyss_plain（账本写 abyss_plain 范围），再交给
+        //   【共用分派器】AbyssEntry。★只换场景数据，不 fork 状态机 / 不复制分派表★。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_scene",
+                "custom_recognition_param": { "scene": "abyss_plain", "set": true }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 200,
+        "next": ["AbyssEntry"]
+    },
+
+    // ------------------------------------------------------------------ 出口
+    "AbyssLevelRequired": {
+        // 【需要 130 级·硬出口】真机实测 16448：点终始之战弹
+        //   「玩家等级达到130后，解锁幻想连战与深渊连战。」→ RANK 不足永远进不了深渊连战。
+        // 判据：abyss_state 分类为 abyss_level_required（两个高信息量整句片段，绝不宽匹配）。
+        // 直接 StopTask，不点任何按钮。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "abyss_level_required", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssLevelGateLine1": {
+        // 仅作 AbyssLevelRequiredNative 的子识别：报错文案前半句（整句片段，精确）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["玩家等级达到\\s*130\\s*后"] }
+        }
+    },
+    "AbyssLevelGateLine2": {
+        // 仅作 AbyssLevelRequiredNative 的子识别：报错文案后半句（整句片段，精确）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["解锁幻想连战与深渊连战"] }
+        }
+    },
+    "AbyssLevelRequiredNative": {
+        // 【原生 OCR 兜底】同 AbyssLevelRequired，但用纯原生 OCR（And 两句），不依赖自定义识别。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["AbyssLevelGateLine1", "AbyssLevelGateLine2"] }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssGiveUp": {
+        // 兜底收工：连续认不出画面超过 lost_sec（ADR 0005）/ 长时间无新关卡 / 阶梯记账异常。
+        // ★没有总时长上限★（max_task_sec=0 = 不限制）：绝不因「跑满 N 小时」无条件收工。
+        // ★没有「刷几套」★：深渊是 30 层线性阶梯，一直往下刷，只靠有界条件收工。
+        // ★ADR 0005★ 迷路阈值 lost_sec 的真源在 scene/abyss.py（LOST_SEC = 60s）；JSON 不再
+        //   复制一份（override 里的 lost_sec 仍可覆盖）。旧的**帧数**参数已全仓删除，
+        //   若 override 残留它只会得到一行「忽略过时参数」警告，绝不静默恢复计数。
+        //
+        // ★#117：终始之战「空态」与「页签切换失败」的唯一收工出口★
+        //   空态锚点 = 真机证据帧 tools/frames/abyss_zhongshi_tabs.png 的读数
+        //   （720 空间 OCR: 没有相关的活动 [240,789,237,37]；侧车 .ocr.txt 同目录）：
+        //   三个页签都没有内容时列表区就写这句。abyss_giveup 取到「三个页签均无内容」
+        //   （abyss_act step=tab 每点一个页签记一笔）或「页签切换失败」时，打一句用户可见的
+        //   `[abyss] 收工 —— <原因>` 并写收工标记，再由本节点 StopTask。
+        //   ★这是既有 giveup 机制，不新造出口★（面板上仍只有「收工原因」这一种收尾）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_giveup",
+                "custom_recognition_param": {
+                    "ocr_entry": "OcrTask",
+                    "max_task_sec": 0,
+                    "no_progress_sec": 900,
+                    "empty_anchor": "没有相关的活动"
+                }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssRecover": {
+        // ★ADR 0005 第 4 条 / 票 #21★ 迷路后的【归位重导航】（最多 2 次，预算在 agent 侧）：
+        //   · recognition = abyss_recover_gate：只有 AbyssGiveUp 刚置了 recover_pending、且
+        //     当前帧仍 unknown 时命中（门控叶，box=[0,0,0,0]，不用于点击）；
+        //   · action = abyss_recover：主城分区深层页 → 点底导「主城」；否则左槽「返回」；
+        //     都不在 → 不点击（绝不盲点）。点完 next 回 AbyssEntry，由既有导航链
+        //     （AbyssNavActivity → AbyssNavZhongshi → 横幅）重进，**不新造导航**。
+        //   · ★必须在 AbyssGiveUp 之后、常规业务节点之前★：GiveUp 判「归位 or 收工」，
+        //     本节点只执行；正常帧恒不命中（旗标门控），不会抢业务节点的帧。
+        //   · post_delay 给主城加载留时间：否则旧帧会立刻再判迷路，两次预算背靠背烧完。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_recover_gate",
+                "custom_recognition_param": { "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_recover",
+                "custom_action_param": { "ocr_entry": "OcrTask" }
+            }
+        },
+        "post_delay": 2500,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssStall": {
+        // 卡死/换日：画面连续 N 秒无变化 → 强杀重开拉回主城（阈值由选项「无响应重开阈值」覆盖）。
+        // ★restart_game 走 MAA controller，设备无关，不写死 16448★。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stall_recover",
+                "custom_recognition_param": { "threshold_sec": 180 }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "max_hit": 8,
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+
+    // ---------------------------- 掉线弹窗「暂时无法连接」→ 点「重新连接」（★不点「选择其他账号」★）
+    "AbyssReconnectText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["暂时无法连接"] } }
+    },
+    "AbyssReconnectBtn": {
+        "recognition": { "type": "OCR", "param": { "expected": ["^重新连接$"] } }
+    },
+    "AbyssReconnect": {
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["AbyssReconnectText", "AbyssReconnectBtn"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 3000,
+        "next": ["AbyssEntry"]
+    },
+
+    // -------------------------------------------------------------- 等待
+    "AbyssLoading": {
+        // 加载/过场/健康忠告：只等待，绝不点击。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "loading", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssRelogin": {
+        // 换日重进：识别到【整句】重进提示 → 强杀重开（同一条恢复链路）。
+        // ⚠ 文案未真机实测；只做整句匹配，绝不宽匹配。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": {
+                    "state": "relogin",
+                    "ocr_entry": "OcrTask",
+                    "relogin_text": "请重新启动游戏"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "max_hit": 8,
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssBattleWait": {
+        // 战斗中：底部 HUD「时间 HH:MM」+「分数 NNN」→ 只等待。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "abyss_battle", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 4000,
+        "next": ["AbyssEntry"]
+    },
+
+    // ------------------------------------------------------------- 结算
+    // 优化 1：结算后优先「继续挑战」直接连打下一场（单人关），拿不到才退回关卡页。
+    // 优化 2：认出结算页就点顶部 QUESTRESULT 横幅快进（[JumpBack]PubQuestResult）。
+    "AbyssSettleState": {
+        // 【结算页·状态门控】仅作结算系列节点的 And 子识别；同时承担本关记账（abyss_state 内 _observe）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "abyss_settle", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "AbyssContinueChallengeText": {
+        // 仅作 AbyssSettleContinueChallenge 的子识别：结算页底部的「继续挑战」按钮。
+        "recognition": { "type": "OCR", "param": { "expected": ["^继续挑战$"] } }
+    },
+    "AbyssSettleContinueChallenge": {
+        // 【优化1·单人连刷】优先点「继续挑战」直接开下一场，不回关卡选择页。
+        // ★必须 And(状态=结算, OCR=继续挑战) 双重门控★：abyss_act 的 _pick 按 OCR 项顺序取
+        //   第一个命中的，而结算页 OK 常排在「继续挑战」之前 → 单节点会误点 OK 回关卡页。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["AbyssSettleState", "AbyssContinueChallengeText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": {
+                    "what": ["^继续挑战$"],
+                    "expect": ["abyss_battle", "abyss_solo_team", "loading", "abyss_settle", "abyss_main", "abyss_hub"]
+                }
+            }
+        },
+        "post_delay": 1200,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssSettleFallback": {
+        // 拿不到「继续挑战」时的退回：点「继续」/「OK」→ 回关卡选择页（第 30 战结束等）。
+        // 判据收敛到 common.PubResultContinueText（薄包装：仍带结算状态门控 + abyss_act 校验推进）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["AbyssSettleState", "PubResultContinueText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": {
+                    "what": ["^继续$", "^OK$"],
+                    "expect": ["abyss_settle", "abyss_battle", "abyss_main", "abyss_hub", "abyss_solo_team", "loading"]
+                }
+            }
+        },
+        "post_delay": 1200,
+        "next": ["AbyssEntry"]
+    },
+
+    // ------------------------------------------------------- 关卡选择页
+    "AbyssMainFight": {
+        // 关卡选择页：点底部卡片上的「关卡条」进入本关。
+        // ★点的是 OCR 到的「第N战」关卡条本身（零偏移）★：校准 §1.1 实测
+        //   「深渊连战EX第1战」@[201,1040,237,32]（= 底部橙色关卡条）。★绝不点「推荐编成」★：
+        //   它弹的是 Party 选择层（校准 §3.2 坑 4），不是进编队页的入口。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "abyss_main", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": {
+                    "what": ["第\\s*\\d+\\s*战"],
+                    "expect": ["abyss_solo_team", "loading", "abyss_main"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+
+    // --------------------------------------------------------- 单人编队页（深渊无共斗）
+    // ---------------------------------------------- 编队页「自动」（#56 二批 / ruling ②）
+    // 深渊EX 的编队页也要保证「自动」是**开**的，且「自动」按钮一律**定位**（模板/OCR）后
+    // 读状态、点识别框中心（不同编队页位置不同，绝不写死坐标）。条件门控（state=off）→ 只在
+    // 当前是关时命中；设开之后下一帧不再命中，随后 AbyssSoloChallenge 接管。
+    "AbyssTeamAutoSet": {
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "auto_switch_state",
+                "custom_recognition_param": { "label": "自动", "state": "off", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "auto_switch",
+                "custom_action_param": { "on": true, "scene": "abyss", "label": "自动", "click_action": "AbyssClick" }
+            }
+        },
+        "post_delay": 800,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssSoloChallenge": {
+        // 单人编队页：点「挑战」开打。ROI 限定底部，避开其它页面的「挑战」文字。
+        // ★#110★ 点击判据真源 = scene/challenge.py::CHALLENGE_CLICK_PATTERNS：整串锚定 +
+        //   至多一个箭头（真机帧 `挑战` / `挑战→` 两种渲染，8/17 帧带箭头）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "abyss_solo_team", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": {
+                    "what": ["^挑战(→)?$"],
+                    "roi": [150, 980, 600, 1180],
+                    "expect": ["abyss_battle", "loading", "abyss_solo_team"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+
+    // ------------------------------------- 进关前的「挑战深渊连战EX」确认框（校准 §3.2 坑 3）
+    // ★hub 点「战斗」先弹确认框，点 OK 才到关卡选择页；不处理会一直停在 hub 空转。★
+    // 判据：And(整句确认文案, 精确 ^OK$)，box_index=1 → 点 OCR 到的 OK（绝不点「取消」）。
+    // ★确认文案来自 scene.abyss.ABYSS_EX.confirm_text（数据化）★：纯深渊是另一条文案（Phase 3）。
+    "AbyssEnterConfirmText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["挑战深渊连战EX"] } }
+    },
+    "AbyssEnterConfirmOk": {
+        "recognition": { "type": "OCR", "param": { "expected": ["^OK$"] } }
+    },
+    "AbyssEnterConfirm": {
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["AbyssEnterConfirmText", "AbyssEnterConfirmOk"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+    // ★普通深渊的进关确认框（#55 Phase 3；去 EX）★：来自 scene.abyss.ABYSS_PLAIN.confirm_text。
+    //   文案「挑战深渊连战」是 EX 文案「挑战深渊连战EX」的【子串】—— 故本节点【必须】带
+    //   AbyssScenePlain 门控，否则普通深渊任务会在 EX 确认框上抢先命中（虽然都点 OK）。
+    "AbyssPlainEnterConfirmText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["挑战深渊连战"] } }
+    },
+    "AbyssPlainEnterConfirm": {
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["AbyssPlainEnterConfirmText", "AbyssEnterConfirmOk", "AbyssScenePlain"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+
+    // ----------------------------------------------------- 深渊EX活动入口（hub）
+    "AbyssHubEnter": {
+        // hub：点活动入口行上的「战斗」进入（先弹确认框，由 AbyssEnterConfirm 点 OK）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "abyss_hub", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": {
+                    "what": ["^战斗$"],
+                    "roi": [0, 600, 720, 1050],
+                    "expect": ["abyss_main", "loading", "abyss_hub"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+
+    // --------------------------------------------------- 从主城导航（数据驱动搜页签）
+    "AbyssNavActivity": {
+        // 主城 → 活动（只认精确「活动」，OCR 点文字本身）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "main_city", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": { "what": ["^活动$"], "expect": ["activity", "loading"] }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssNavZhongshi": {
+        // 活动页 → 终始之战。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "activity", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": { "what": ["终始之战"], "expect": ["zhongshi", "loading"] }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssZhongshiGate": {
+        // 【终始之战列表页·门控】仅作 AbyssNavBanner 的 And 子识别：确认当前在终始之战列表页。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "zhongshi", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "AbyssBannerEx": {
+        // 【深渊EX 横幅·模板匹配】★优先于 OCR★：横幅标题是画进图里的艺术字，OCR 不可靠，
+        // 且「深渊连战」⊂「深渊连战EX」子串歧义。模板 banner_abyss_ex.png（671x146），
+        // 阈值 0.90：EX 自证 1.0；对【纯深渊】横幅的假阳分 = 0.874 < 0.90（校准 §3.2 坑 1）。
+        // roi 限定横幅所在的列表行（720 空间 box (26,463) 起 671x146），进一步降假阳。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": "banner_abyss_ex.png",
+                "threshold": 0.90,
+                "roi": [26, 463, 671, 146]
+            }
+        }
+    },
+    "AbyssNavBanner": {
+        // 终始之战列表页：当前页签能看到「深渊EX」横幅（模板命中）时就点它。
+        // 看不到 → 本节点不命中，交由 AbyssNavTab 切下一个二级页签继续找。
+        // box_index=1 → 点击目标 = 模板匹配的横幅框中心（零偏移）。
+        // ★场景门控 AbyssSceneEx（#55 Phase 3）★：只有深渊EX 任务才允许点 EX 横幅 ——
+        //   普通深渊任务的「未通关」页签里 EX 横幅同样可见，不门控会误进 EX。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["AbyssZhongshiGate", "AbyssBannerEx", "AbyssSceneEx"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssBannerPlain": {
+        // 【普通深渊 横幅·模板匹配】banner_abyss_plain.png（671x146，与 EX 同几何）。
+        // ★两条横幅必须可靠区分（校准 §3.2 坑 1）★：EX 模板对纯深渊横幅假阳 0.8708；
+        //   本模板与 EX 模板互相 ZNCC≈0.874 < 0.90 阈值（自证 1.0）。阈值 = 配置数据。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": "banner_abyss_plain.png",
+                "threshold": 0.90,
+                "roi": [26, 463, 671, 146]
+            }
+        }
+    },
+    "AbyssPlainNavBanner": {
+        // 终始之战列表页：普通深渊任务里，当前页签能看到「深渊连战」横幅（模板命中）时就点它。
+        // 看不到 → 不命中，交由 AbyssNavTab 切下一个二级页签继续找（本账号纯深渊在「完成」页签）。
+        // ★场景门控 AbyssScenePlain★：只有普通深渊任务才允许点它（不误点 EX 横幅）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["AbyssZhongshiGate", "AbyssBannerPlain", "AbyssScenePlain"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+    "AbyssNavTab": {
+        // 终始之战列表页：切二级页签（未通关 → 已通关 → 完成）继续找「深渊EX」横幅。
+        // ★页签列表是【数据】★（scene.abyss.ZHONGSHI_TABS）；abyss_act step=tab 维护循环索引，
+        // OCR 点页签文字本身。**不假定目标在哪个页签**（随账号进度变）。
+        //
+        // ★#117：判据不许自证★（真机 384，2026-10-18 08:0x）
+        //   旧写法 `expect: ["zhongshi", "loading"]` 的语义是「点完还是 zhongshi 就算通过」——
+        //   而切页签时页面状态**本来就该还是 zhongshi** ⇒ 判据恒成立 ⇒ 三个页签全空时
+        //   「未通关/已通关/完成」三连无限重复，直到人工停掉。
+        //   现在：validate="content_change" —— 点完页签**内容区文本集合必须变**才算生效
+        //   （内容区 = scene.abyss.ZHONGSHI_CONTENT_BOX，页签栏与底导带都不算）；
+        //   点完是空态锚点「没有相关的活动」= 该页签确实没内容（不是失败）；
+        //   没变也不是空态 ⇒ 记一次无证据，**三个页签各点 2 轮（共 6 次）仍无证据 ⇒ 带原因收工**。
+        //   retry_limit=1 = 重试 1 轮（真源 scene.abyss.TAB_SWITCH_RETRY_LIMIT；#19 的结论：
+        //   不许多次重试，重试后必须带原因退出）。
+        //   scan_rounds=2 = 整轮扫描上限（真源 scene.abyss.TAB_SCAN_ROUND_LIMIT）：横幅节点排在
+        //   切页签**之前**，所以「还在切页签」等价于「这一轮页签上都没有横幅」——切满 2 轮
+        //   （6 次）还没被横幅节点接手 ⇒ 收工并说明「扫过 2 轮页签都没有找到横幅」
+        //   （账号没有这条活动时的**明确原因**，而不是无限空转）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "abyss_state",
+                "custom_recognition_param": { "state": "zhongshi", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "abyss_act",
+                "custom_action_param": {
+                    "step": "tab",
+                    "tabs": ["未通关", "已通关", "完成"],
+                    "validate": "content_change",
+                    "retry_limit": 1,
+                    "scan_rounds": 2
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["AbyssEntry"]
+    },
+
+    // ------------------------------------------------------------- 兜底
+    "AbyssWait": {
+        // 认不出的画面：只等待，绝不盲目点击。
+        // ★本节点是【最后的 DirectHit 万能兜底】—— 任何一帧它都能命中，故【永远无限可用】★。
+        //   ★绝不可给它加 max_hit★（长跑常客加 max_hit 会让它在用尽后被永久跳过 →
+        //   Node.NextList.Failed；见 kernel abyss.json 的 2026-10-07 血泪教训）。
+        // 空转防护靠「连续认不出画面超过 lost_sec」（abyss_giveup，ADR 0005）+ stall_recover
+        // （AbyssStall），不靠 max_hit。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 2000,
+        "next": ["AbyssEntry"]
+    }
+}
