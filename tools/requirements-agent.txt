@@ -1,0 +1,15 @@
+﻿# Agent runtime dependencies for the bundled portable Python (install/python).
+#
+# NOT for the build interpreter: tools/requirements.txt covers the build scripts
+# (json-with-comments). These pins are installed into the portable interpreter
+# before tools/install.py packages it:
+#
+#   pip install --target install/python/Lib/site-packages -r tools/requirements-agent.txt
+#   install/python/python.exe -c "import maa, numpy"   # smoke test, must exit 0
+#
+# Keep these pins in sync with the interpreter staged in install/python and with
+# the MaaFramework release selected by MAAFW_VERSION (currently 5.13.1).
+maafw==5.13.1
+MaaAgentBinary==1.0.1
+numpy==2.5.3
+StrEnum==0.4.15

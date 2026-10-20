@@ -1,0 +1,125 @@
+{
+    "TeamEntry": {
+        "desc": "编队页入口：主城底部「角色」→ 角色页「队伍编成」（OCR 门控，绝不盲点）",
+        "recognition": {
+            "type": "DirectHit",
+            "param": {}
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": [
+                        "^角色$"
+                    ],
+                    "roi": [
+                        0,
+                        1180,
+                        720,
+                        1280
+                    ],
+                    "wait_ms": 900
+                }
+            }
+        },
+        "next": [
+            "TeamOpenEditor"
+        ],
+        "timeout": 3000
+    },
+    "TeamOpenEditor": {
+        "desc": "角色页 →「队伍编成」",
+        "recognition": {
+            "type": "OCR",
+            "param": {
+                "expected": [
+                    "队伍编成"
+                ]
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": [
+                        "队伍编成"
+                    ],
+                    "wait_ms": 1200
+                }
+            }
+        },
+        "next": [
+            "TeamSwitch"
+        ],
+        "timeout": 3000
+    },
+    "TeamSwitch": {
+        "desc": "闭环切到目标 SET / 队（数值真源 scene/team.py；参数由「切换编队」选项覆盖）",
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "team_state"
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "team_switch",
+                "custom_action_param": {
+                    "set": 1,
+                    "party": 5
+                }
+            }
+        },
+        "next": [],
+        "timeout": 5000
+    },
+    "TeamSwitchBattle": {
+        "desc": "★#105★ 战前编队页（A 类）就地切 SET：读 `SET N` → 点实测圆点 → 再读（闭环）。队切换未标定 → 拒动并说明；绝不盲点队伍点条。",
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "team_state"
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "team_switch_battle",
+                "custom_action_param": {
+                    "set": 1,
+                    "party": 5
+                }
+            }
+        },
+        "next": [],
+        "timeout": 5000
+    },
+    "TeamSwitchBattleOpenEditor": {
+        "desc": "★#105★ 战前编队页 → 【编成】进入编辑器（B 类），仅当需要切队时使用（当前未启用）",
+        "recognition": {
+            "type": "OCR",
+            "param": {
+                "expected": [
+                    "^编成$"
+                ],
+                "roi": [
+                    480,
+                    900,
+                    200,
+                    80
+                ]
+            }
+        },
+        "action": {
+            "type": "Click",
+            "param": {}
+        },
+        "next": [
+            "TeamSwitchBattle"
+        ],
+        "timeout": 3000
+    }
+}

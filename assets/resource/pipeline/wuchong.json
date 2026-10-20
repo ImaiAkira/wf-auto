@@ -1,0 +1,1336 @@
+{
+    // ==========================================================================
+    // 五重决战 自动刷（共斗开房 + ★手操战斗★）—— 入口：WuchongEntry（#56 Phase 4）
+    //
+    // 【铁律 1：本文件自包含】业务节点 next 一律回 WuchongEntry（除 StopTask 出口）。只复用
+    //   common.json 的公共「叶」事件（PubReturnHome / PubGameOver* / PubDailyPopup /
+    //   PubLoginContinue / PubTitleStart）—— 与 kernel 同一手法，只是本线的节点名/动作名不同。
+    //
+    // 【铁律 2：导航与页面判据全在 scene/wuchong.py】领主战 → 降临讨伐（页签，y_max/roi 约束）
+    //   → 滚动找「五王连战」行（模板优先）→ 五重决战·超级 详情 → 单人/多人 → 编队/房间
+    //   → 招募 → 开始招募 → 人齐 → 挑战 → 战斗 → 结算。行/详情用**模板匹配**（运维：尽量图片识别），
+    //   按钮用 OCR 点框中心（wuchong_act，绝不「识别框 + 死偏移」）。
+    //
+    // 【铁律 3：★跨模式「自动」规则★】「除了五重决战可以选择自动或手动以外，其他所有战斗
+    //   都需要勾选自动」。落地（★二批：自动的切换移到战斗外★）：
+    //     · 编队页/房间页 WuchongTeamAutoSet / WuchongTeamContSet = wuchong_switch
+    //       （「自动」按钮**定位**后读状态、点识别框中心；★战斗内不再切自动★）；
+    //     · 手操引擎 WuchongBattle 只在「是否手操=手操」时启用；wuchong_switch 对非五重场景
+    //       一律夹回「自动开」（scene.wuchong.effective_auto_state，守卫 wuchong-cross-mode-auto）；
+    //     · 其他所有模式编队页的「自动」由 SpecialTeamAutoSet / AbyssTeamAutoSet + auto_switch 覆盖。
+    //
+    // 【铁律 4：安全红线】绝不 KeyEvent 4；返回一律用屏幕按钮。手操连点走框架原生 Click
+    //   （一次 run_action 连点 burst 下），不逐次 post_click。
+    //
+    // ★待真机校准★（离线无设备；见 scene/wuchong.py 顶部与报告 deferred）：共斗开房的
+    //   recruit_* 坐标、「自动」标签裁片跨机型的阈值、结算按钮优先级。
+    // ==========================================================================
+    "WuchongEntry": {
+        // 枢纽：★异常前缀（打断型 + 兜底，挂在每个节点上）★ + 全部流程节点 + 链尾兜底。
+        // 顺序 = scene.wuchong.hub_next()（数据派生）；漂移由 hooks_wuchong 把守。
+        "next": [
+            "[JumpBack]PubReturnHome",
+            // ★#102 P0-1★ 第一步的**模板优先**通道（真源 scene/stamina.py::RECOVERY_STEPS）。
+            //   与下面那条 OCR 版是**同一动作**（点星导石行框中心），只差行判据：图标模板 vs 行名 OCR。
+            //   ★必须排在 OCR 版之前★：next 是**有序候选**，先命中先执行 ⇒ 模板在前才叫「模板优先」。
+            //   （本枢纽 == scene.wuchong.hub_next()，逐项由 hooks_wuchong / hooks_103 / hooks_stamina 把守。）
+            "[JumpBack]PubStaminaUseStoneTpl",
+            "[JumpBack]PubStaminaUseStone",
+            "[JumpBack]PubStaminaConfirmOk",
+            "[JumpBack]PubStaminaDoneOk",
+            "WuchongNetError",
+            "WuchongResumeQuest",
+            "WuchongServerUnreachable",
+            "WuchongGiveUp",
+            "WuchongStall",
+            "WuchongNetGuard",
+            "WuchongRenav",
+            "WuchongResume",
+            "WuchongContinueGuard",
+            "[JumpBack]PubGameOverContinue",
+            "[JumpBack]PubDailyPopup",
+            "[JumpBack]WuchongBonusNo",
+            "WuchongNetDisconnect",
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            "WuchongNavLord",
+            "WuchongNavJoss",
+            "WuchongNavRow",
+            "WuchongScrollList",
+            "WuchongDetailFight",
+            "WuchongModeSolo",
+            "WuchongModeMulti",
+            "WuchongRecruitOpen",
+            "WuchongRecruitStart",
+            "WuchongCoopChallenge",
+            "WuchongRoomLeave",
+            "WuchongStaleTeam",
+            "WuchongTeamAutoSet",
+            "WuchongTeamContSet",
+            "WuchongTeamChallenge",
+            "WuchongRoomWait",
+            "WuchongBattleAutoOff",
+            "WuchongBattle",
+            "WuchongSettleContinue",
+            "WuchongSettleReturnRoom",
+            "WuchongSettleDisband",
+            "WuchongWait"
+        ],
+        "timeout": 3000
+    },
+
+    // ------------------------------------------------- 原生动作辅助（被 run_action 调用）
+    "WuchongClick": {
+        // 原生 Click 入口，由 wuchong_act / wuchong_battle 通过 context.run_action 调用。
+        // ★不设 max_hit★（一局要点成百上千次）；不在 WuchongEntry.next 里。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "Click", "param": { "target": true } }
+    },
+    "WuchongSwipe": {
+        // 原生 Swipe 入口（技能滑动 / 列表滚动），由 wuchong_battle / WuchongScrollList 调用。
+        // ★不设 max_hit★；不在 WuchongEntry.next 里。
+        // ★#58★ 行内参数已归一到【区域内竖直下滑】：wuchong_battle 每次都经 pipeline_override
+        //   注入 scene.wuchong.WUCHONG_BATTLE 校准的技能手势（技能1左/技能2上/技能3右），
+        //   故**战斗手感一字未动**；此默认值只为「默认值也绝不横向（dx==0）」这条导航
+        //   红线兜底（原值 [360,600]->[200,600] 是横向 dx=-160）。几何守卫见
+        //   tools/contract_hooks/hooks_58.py。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 900], "end": [360, 700], "duration": 450 }
+        }
+    },
+
+    // ------------------------------------------------------------- 页面状态子识别
+    "WuchongLordState": {
+        // 领主战/降临讨伐 列表页（有「五王连战」条目）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_lord_list", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "WuchongDetailState": {
+        // 五重决战·超级 详情页（有标题 + 推荐编成/战斗）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_detail", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "WuchongModeState": {
+        // 模式选择页（单人游戏 / 多人游戏）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_mode", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "WuchongRoomState": {
+        // 共斗房间页。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_room", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "WuchongRecruitDialogState": {
+        // 招募方式弹窗。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_recruit_dialog", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "WuchongTeamState": {
+        // 编队页（单人/多人共用的队伍页）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_team", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "WuchongSettleState": {
+        // 结算 / 奖励页。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_settle", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "WuchongBattleState": {
+        // 战斗中（底部 HUD「时间 HH:MM」+「分数 N」）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_battle", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+
+    // --------------------------------------------------- 目标行 / 详情页模板（图片识别优先）
+    "WuchongRowBanner": {
+        // 【五王连战 行·模板匹配】行副标题「五重决战 / 五王连战」裁片（720 空间，真机帧
+        // tools/frames/20_lord_tab_降临讨伐_列表首行五王连战.png）。自证 ZNCC=1.0、跨帧 ≤0.53。
+        // roi 限定在列表卡片区，避开顶部大横幅。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": ["wuchong/row_wuwang.png"],
+                "threshold": 0.8,
+                "roi": [150, 440, 570, 560]
+            }
+        }
+    },
+    "WuchongDetailBanner": {
+        // 【五重决战·超级 详情页·模板匹配】标题「五重决战 / 五重决战 超级」裁片（真机帧
+        // tools/frames/21_wuchong_详情页_五重决战超级.png）。★绝不点错目标★：只有确在五重·超级
+        // 详情页才继续按「战斗」。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": ["wuchong/detail_wuchong.png"],
+                "threshold": 0.8,
+                "roi": [120, 400, 520, 620]
+            }
+        }
+    },
+
+    // ------------------------------------------------------------- 掉线/重连（#107 / #114）
+    // ★#114★ 旧版这里另写了一份「暂时无法连接 + ^重新连接$」OCR 列表 —— 与
+    //   WuchongServerUnreachable 重复 = 第二套判据。现统一走共享判据 ``wuchong_net``，
+    //   并同样挂动作侧 ``server_retry`` 时间闩（冷却约束一致）。
+    "WuchongNetDisconnect": {
+        // 断线弹窗 → 冷却窗口内点【重新连接】一次；窗口外交给 WuchongNetGuard 重启。
+        // ★不设 max_hit★（断线长跑中会反复出现；上限由 agent 侧任务会话计数承担）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_net",
+                "custom_recognition_param": {
+                    "mode": "retry",
+                    "kinds": ["UNREACHABLE"],
+                    "ocr_entry": "OcrTask"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^重新连接$", "^重试$"],
+                    "roi": [0, 750, 720, 170],
+                    "latch": "server_retry"
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": ["WuchongEntry"]
+    },
+
+    // ------------------------------------------------------------- 领主加成点数弹窗
+    // ★真机必经确认框★：详情页→战斗 后弹「要使用增加报酬的领主加成点数吗？」，本文件必须应答，
+    // 否则流程原地卡死（kernel D15 教训）。答「否/是」由界面选项「使用领主加成点数」覆盖
+    // （关掉不需要的那个节点）。
+    "WuchongBonusText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["领主加成点数"] } }
+    },
+    // ★#102 P0-2★ 「是 / 否」按钮 —— 一两个字、没有上下文可纠错（调研 §2.1 D2）；
+    //   点错会改游戏状态（用掉领主加成点数 / 白扣一次），是本仓「误点代价最高」的那一对。
+    //
+    // ★做法：保留原节点名 WuchongBonusNoBtn / WuchongBonusYesBtn，把它的**判据**换成
+    //   双通道 Or(模板优先, OCR 兜底)★ —— 于是 WuchongBonusNo / WuchongBonusYes 的
+    //   And(box_index:1) 与各流程节点的候选集**一个字节都不用改**（零接线风险）。
+    //
+    // ★数字（真机帧 lord_bonus_dialog.png，全滑窗 TM_CCOEFF_NORMED；存档 scene/templates.py）★
+    //   【否】正例 **1.0000 @(44,789)**；负例 6 帧 ROI 内最高 **0.5609**（灰 0.1780 / 彩 0.5609）
+    //   ⇒ 阈值 0.85 余量 **0.2891**。
+    //   【是】正例 **1.0000 @(372,789)**；负例 6 帧 ROI 内最高 **0.4642** ⇒ 余量 **0.3858**。
+    //   ★同帧另一按钮（互为正负例）★：灰 **0.5840**、彩 **−0.9169** —— 两个底框**像素级同款**，
+    //   灰口径下 0.5840 说明「靠阈值挡不住兄弟控件」，真正挡住它的是 roi（各框一半，见下）。
+    //   ★ROI 外的危险高分★：「体力回复了！」结果窗的【取消】也是同款红色圆角按钮，
+    //   灰 **0.7091 @(206,789)** —— 它在 roi 的 x 允许范围（0..64）之外，被 roi 挡住。
+    //
+    // ★两态（可点 / 置灰）待真机★：本帧只有可点态。若置灰态出现，模板会失配 → **自动退回 OCR
+    //   `^否$`**（这就是保留 OCR 兜底的意义），不会静默失效。
+    "WuchongBonusNoBtnTpl": {
+        // 【否】按钮底框 + 字（模板）。裁自 1080 原图 LANCZOS 720 的 (44,789,296,73)。
+        // roi 只框**左半**：右边界 360 < 是按钮左边界 372（把兄弟整个排除出候选池）。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": ["wuchong/bonus_btn_no.png"],
+                "threshold": 0.85,
+                "roi": [0, 760, 360, 140],
+                "order_by": "Score"
+            }
+        }
+    },
+    "WuchongBonusNoBtnOcr": {
+        // 【否】按钮的 OCR 兜底（= #102 之前 WuchongBonusNoBtn 的原判据，逐字保留）。
+        "recognition": { "type": "OCR", "param": { "expected": ["^否$"] } }
+    },
+    "WuchongBonusNoBtn": {
+        // ★双通道★：模板优先、OCR 兜底（Or = 命中第一个即成功）。
+        "recognition": {
+            "type": "Or",
+            "param": { "any_of": ["WuchongBonusNoBtnTpl", "WuchongBonusNoBtnOcr"] }
+        }
+    },
+    "WuchongBonusYesBtnTpl": {
+        // 【是】按钮底框 + 字（模板）。roi 只框**右半**：左边界 360 > 否按钮右边界 340。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": ["wuchong/bonus_btn_yes.png"],
+                "threshold": 0.85,
+                "roi": [360, 760, 360, 140],
+                "order_by": "Score"
+            }
+        }
+    },
+    "WuchongBonusYesBtnOcr": {
+        // 【是】按钮的 OCR 兜底（= #102 之前 WuchongBonusYesBtn 的原判据，逐字保留）。
+        "recognition": { "type": "OCR", "param": { "expected": ["^是$"] } }
+    },
+    "WuchongBonusYesBtn": {
+        // ★双通道★：模板优先、OCR 兜底。
+        "recognition": {
+            "type": "Or",
+            "param": { "any_of": ["WuchongBonusYesBtnTpl", "WuchongBonusYesBtnOcr"] }
+        }
+    },
+    "WuchongBonusNo": {
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongBonusText", "WuchongBonusNoBtn"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 600,
+        "next": ["WuchongEntry"]
+    },
+    "WuchongBonusYes": {
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongBonusText", "WuchongBonusYesBtn"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 600,
+        "next": ["WuchongEntry"]
+    },
+
+    // ------------------------------------------------------------- 出口 / 异常
+    "WuchongGiveUp": {
+        // 兜底收工：未知画面过多 / 长时间无进展 / 显式总时长（max_task_sec=0=不限制）→ StopTask。
+        // ★P0 修复（coop-fix2）★：加 ``room_wait_sec`` —— 共斗房停留过久仍未开战 / 人齐 → 有理由收工
+        //   （reason 点名共斗房），绝不无限死等。停留时钟由 wuchong_impl._observe 维护。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_giveup",
+                "custom_recognition_param": {
+                    "ocr_entry": "OcrTask",
+                    "max_task_sec": 0,
+                    "no_progress_sec": 900,
+                    "room_wait_sec": 300,
+                    // ★本票「打几次」★：raw 默认 0 = 不限制（保持旧行为：一直刷到异常兜底）。
+                    //   界面选项「打几次」（agent 读 target_fights）会整体替换本 recognition，
+                    //   打够 N 次即按同一理由收工。★#74 修正（规格 B2/D2）★ 计数 = 每**进入一场
+                    //   战斗**（战斗 HUD 首次出现）一笔账本 wuchong/fight/{n}；续关后回到战斗不算
+                    //   新的一场（旧口径记在结算页 —— 真机所有战斗都以关卡失败收场时账本恒为 0）。
+                    "target_fights": 0
+                }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "next": []
+    },
+    "WuchongStall": {
+        // 卡死/ANR：画面连续 N 秒无变化 → 强杀重开拉回主城（设备无关的 restart_game，不写死 serial）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stall_recover",
+                "custom_recognition_param": { "threshold_sec": 180 }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "max_hit": 8,
+        "post_delay": 600,
+        "next": ["WuchongEntry"]
+    },
+    // ---------------------------------------------------------------- 掉网模态（#107 / #114）
+    // 三种断连文案（真机证据帧 tools/frames/）：
+    //   · F2032 掉线      net_error_f2032.png     未能连网 / 请确认 / (No.F2032) + 【OK】
+    //   · A4050 会话错误  session_error_a4050.png 发生意想不到的错误 / 回到登录界面 (No.A4050) + 【OK】
+    //   · 服务端连不上    server_unreachable.png  暂时无法连接 / 客户端接入提示 + 【重新连接】/【重试】
+    // ★判据只有一份★：三个节点统一走 custom recognition ``wuchong_net``（agent/wuchong_impl
+    //   ``net_disconnect_kinds``；文案表真源 scene.wuchong.NET_DISCONNECT_TEXTS），
+    //   **不再各写一份 OCR expected 列表**。
+    // ★有界重启（真源 scene.wuchong ②h）★：冷却窗口内 mode=retry 命中 → 点一次
+    //   【OK】/【重新连接】；窗口外 retry 不再命中（不会每轮狂点）→ WuchongNetGuard 重启客户端；
+    //   第 4 次断连由 WuchongGiveUp 带原因收工。冷却一律走动作侧时间闩，不拉长 post_delay。
+    "WuchongServerUnreachable": {
+        "desc": "服务端连不上 → 冷却窗口内点【重新连接】/【重试】一次；窗口外交给 WuchongNetGuard 重启",
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_net",
+                "custom_recognition_param": {
+                    // ★#114★ 共享判据：只认「暂时无法连接」这一种；冷却 10s 由识别器 + 动作闩双重把守。
+                    "mode": "retry",
+                    "kinds": ["UNREACHABLE"],
+                    "ocr_entry": "OcrTask"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    // ★#113★ 点【重新连接】/【重试】，按**时间闩**冷却 10s：服务端限流时密集重试只会更糟。
+                    //   冷却走动作侧闩（真源 scene.wuchong.SERVER_RETRY_COOLDOWN_S），不靠 post_delay。
+                    "what": ["^重新连接$", "^重试$"],
+                    "roi": [0, 750, 720, 170],
+                    "latch": "server_retry"
+                }
+            }
+        },
+        // ★节奏契约★ post_delay 必须 ≤1000（hooks_cadence / wuchong-cadence-pact）。这里**故意**
+        //   不在这里做 10s 冷却：重试冷却应由动作侧按时间闩做，而不是拉长 post_delay
+        //   —— 那会把整条流程的节奏拖慢（#78 的教训）。整体仍由 giveup.no_progress_sec=900 兜底。
+        "post_delay": 1000,
+        "next": ["WuchongEntry"],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    // ★#107/#114★ 重启/重连后的恢复模态：「有正在进行中的关卡 / 是否继续关卡？」→ 点【继续】
+    //   接回本场（保留进度；点放弃会白丢一张票）。★重启后必须经它 / PubLoginContinue /
+    //   PubTitleStart 接回，绝不许在重启动作里直接乱点★。证据帧 resume_quest_modal.png。
+    "WuchongResumeQuestText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["正在进行中的关卡", "^是否继续关卡$"] } }
+    },
+    "WuchongResumeQuestContinue": {
+        "recognition": { "type": "OCR", "param": { "expected": ["^继续$"], "roi": [460, 770, 260, 110] } }
+    },
+    "WuchongResumeQuest": {
+        "desc": "崩溃重连恢复模态 → 点【继续】接回本场（box_index=1 = 继续按钮框心），回枢纽",
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongResumeQuestText", "WuchongResumeQuestContinue"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 900,
+        "next": ["WuchongEntry"],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    // F2032 与 A4050 是**同一颗【OK】**（1080 y=1208 → 720 y≈805；roi 用 720 空间）。
+    // ★#114★ 两种错误码都由共享判据切分（detail 里 kind=F2032 / A4050），动作只点 OK。
+    "WuchongNetError": {
+        "desc": "F2032 掉线 / A4050 会话错误 → 冷却窗口内点【OK】一次；窗口外交给 WuchongNetGuard 重启",
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_net",
+                "custom_recognition_param": {
+                    "mode": "retry",
+                    "kinds": ["F2032", "A4050"],
+                    "ocr_entry": "OcrTask"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^OK$"],
+                    "roi": [0, 700, 720, 260],
+                    "latch": "server_retry"
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": ["WuchongEntry"],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    "WuchongNetGuard": {
+        // ★#114★ 三种断连（F2032/A4050/暂时无法连接）在冷却重试后仍不恢复 → **有界重启客户端**。
+        //   · 动作复用已注册的 restart_game（设备无关；am force-stop → 重新拉起；等待 45s）；
+        //   · 计数在 agent 侧（_SESSION.net_restarts，3 次/任务）；第 4 次断连由 WuchongGiveUp 收工；
+        //   · ★重启后 next=WuchongEntry★：由既有 [JumpBack]PubLoginContinue / PubTitleStart +
+        //     WuchongResumeQuest 接回「继续游戏 / 点击开始 / 有正在进行中的关卡」——
+        //     本节点绝不自己点屏幕（守卫 hooks_114 ③）。
+        //   ★不设 max_hit★（任务级共享计数会静默失效；上限由识别器的任务会话计数承担）。
+        "desc": "断连冷却后仍失败 → 重启客户端（最多 3 次/任务）；超限由 WuchongGiveUp 带原因收工",
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_net",
+                "custom_recognition_param": {
+                    "mode": "restart",
+                    "limit": 3,
+                    "ocr_entry": "OcrTask"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "force_stop_wait": 3,
+                    // 真源 scene.wuchong.RELAUNCH_WAIT_SEC = 45.0（真机重启后 ≈40s 回到登录成功）。
+                    "restart_wait": 45,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "post_delay": 600,
+        "next": ["WuchongEntry"],
+        "on_error": ["WuchongEntry"]
+    },
+    "WuchongRenav": {
+        // 返回房间时房间已解散 → 重新导航（分派链天然重走）；连续失败 >= limit → StopTask。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_renav",
+                "custom_recognition_param": { "limit": 3, "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "next": []
+    },
+    "WuchongResume": {
+        // 「续战」弹窗（挂掉后继续本局）。
+        // ★#56 二批（运维裁决①）★：OCR 一律**整串锚定** `^续战$` —— 裸「续战」会误命中
+        //   编队页/房间页的「**自动续战**」并被 wuchong_act 点掉（真机实测发生）。锚定后
+        //   「自动续战」不再命中本节点（守卫 auto-outside-resume-anchored 把守）。
+        "recognition": { "type": "OCR", "param": { "expected": ["^续战$"] } },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": { "what": ["^续战$"], "expect": ["wuchong_battle", "wuchong_team", "loading"] }
+            }
+        },
+        "post_delay": 1000,
+        "next": ["WuchongEntry"]
+    },
+    "WuchongContinueGuard": {
+        // ★#72★ GAMEOVER 续关的【上限闸 + 有原因收工】（与 WuchongGiveUp 同形：StopTask 出口）。
+        //   五重在 GAMEOVER 屏点【续关】（公共节点 PubGameOverContinue，点识别框中心）；本节点
+        //   是它的**闸**：挂在每个流程节点的异常前缀里、排在 [JumpBack]PubGameOverContinue 之前
+        //   （scene.wuchong.continue_refs() 的 order 承重）。识别器 wuchong_continue_guard：
+        //     · 只在**确为 GAMEOVER 续关页**（同时含『GAMEOVER』+「是否续关」）时动作；
+        //     · 每个 GAMEOVER episode（连帧算一次）记一笔账本 wuchong/continue/{n}；
+        //     · `target_continues = N > 0` 时**恰好允许 N 次续关**，第 (N+1) 个 episode 命中并收工；
+        //       `target_continues = 0` = 不限（永不由此停；规格「续关无限」）。
+        //   ★命中即 _mark_run_done()（写 wuchong/run/completed）+ 本节点 action=StopTask★：
+        //   带原因收工、绝不空转。界面选项「五重续关几次」整体替换本 recognition（写全 target_continues）。
+        //   ★本节点与「五重打几次」（写 WuchongGiveUp）写的是**不同节点** → MAA 的整体替换互不覆盖★。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_continue_guard",
+                "custom_recognition_param": { "ocr_entry": "OcrTask", "target_continues": 0 }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "next": []
+    },
+
+    // ------------------------------------------------------------- 结算（三去向）
+    // 顺序（运维）：解散优先 → 返回房间兜底 → 继续挑战（单人连打）。
+    "WuchongSettleDisband": {
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongSettleState", "WuchongDisbandText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^解散$"],
+                    "roi": [0, 1150, 720, 1280],
+                    "expect": ["wuchong_lord_list", "wuchong_team", "wuchong_room", "main_city"]
+                }
+            }
+        },
+        "post_delay": 400,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongEntry",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongDisbandText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["^解散$"] } }
+    },
+    "WuchongReturnRoomText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["^返回房间$"] } }
+    },
+    "WuchongSettleReturnRoom": {
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongSettleState", "WuchongReturnRoomText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^返回房间$"],
+                    "roi": [0, 1150, 720, 1280],
+                    // ★2026-10-19 收尾★：打够次数后的最后一场结算**优先【解散】**——共斗结算第三屏
+                    //   同时有【解散】/【返回房间】，只有【解散】一步回主城（真机帧
+                    //   tools/frames/coop_result_dissolve.png → 点【解散】→ coop_result_home.png）。
+                    //   正常运行时（未收尾）绝不走这支：仍点【返回房间】回房续战，绝不解散房间。
+                    "finish_prefer": ["^解散$"],
+                    "expect": ["wuchong_team", "wuchong_room", "main_city"]
+                }
+            }
+        },
+        "post_delay": 400,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamChallenge",
+            "WuchongRoomWait",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongContinueText": {
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^继续挑战$", "^继续$", "^OK$"], "roi": [0, 1150, 720, 1280] }
+        }
+    },
+    "WuchongSettleContinue": {
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongSettleState", "WuchongContinueText"] }
+        },
+        // ★#78 结算推进★：一次点击 + 立刻校验（wait_ms 700ms），没推进就**交给下一轮**——
+        //   原来慢不是因为少点几下，而是本节点 ``timeout: 12000`` 的空转重试（实测周期 12.4s）
+        //   与 ``post_delay: 1500``；两者已砍到 3000 / 400。
+        //   · ``what_next`` = 本页按钮找不到时的**兜底按钮**：结算有多段
+        //     （排名页【继续】→ 奖励页【OK / 返回房间】）；不给兜底的话每个子页都要回管线等一拍。
+        //     ★故意不含「解散」★ —— 那会把共斗房关掉（下一场要重新建房招募，多花约一分钟）。
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    // ★#107 运维反馈★ 结算页**优先【再次挑战】**：单人结算只有 OK / 再次挑战，
+                    //   点 OK 会退出到详情页、再走「战斗→编队页→挑战」≈2 分钟；点再次挑战直接续战。
+                    //   灰掉时自然落到下面的 OK 兜底。
+                    "what": ["^再次挑战$", "^继续挑战$", "^继续$", "^OK$"],
+                    "roi": [0, 1150, 720, 1280],
+                    // ★#107 真机（单人）★ 点 OK 后**去的是详情页**（不是编队/房间/战斗）；
+                    //   原 expect 缺 wuchong_detail ⇒ 每次点完都报「校验未通过」= 假失败。
+                    "expect": ["wuchong_team", "wuchong_room", "wuchong_battle", "wuchong_detail", "main_city"],
+                    "what_next": ["^OK$", "^返回房间$"],
+                    // ★2026-10-19 收尾★：打够次数后的最后一场结算**不许点【再次挑战】/【继续挑战】**
+                    //   —— 那会新开一局，把「打几次」无限推迟（单人结算屏第一颗就是【再次挑战】）。
+                    //   收尾时只走【继续】/【OK】（把多段结算点完），由 WuchongSettleReturnRoom 的
+                    //   finish_prefer 决定怎么离开共斗；正常运行时本字段不生效，候选一字不改。
+                    "finish_skip": ["^再次挑战$", "^继续挑战$"]
+                }
+            }
+        },
+        "post_delay": 400,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamChallenge",
+            "WuchongRoomWait",
+            "WuchongBattle",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    // --------------------------------------------------- 战斗页关自动（★本票 #71★）
+    "WuchongBattleAutoOff": {
+        // 【战斗页关自动】只在「是否手操=手操」时启用（raw 默认关）。
+        // 运维裁决（spec B1/D4）：编队页关自动不管用 —— 游戏会在战斗里又把它打开，所以必须在**战斗页**关。
+        // ★只关不开★：action.on 恒为 false；scene 恒为 wuchong；scope=battle（战斗页作用域）。
+        // ★判不出就不动★：on_unknown 传空串（绝不盲点）；一场战斗只尝试一次（闩锁在 agent 侧，key=BATTLE_AUTO_ONCE_KEY）。
+        // ★raw 默认 __NONE__★ 与 WuchongBattle 同形：手操引擎关 ⇔ 本节点不被选中。
+        // ★不设 max_hit★：一场一次靠 agent 侧闩锁；设了 max_hit 会在整局任务里用尽 → 第二局就不会关自动了。
+        // next = scene.wuchong.step_next("WuchongBattleAutoOff")（数据派生，漂移由 hooks_wuchong 把守）。
+        "recognition": { "type": "OCR", "param": { "expected": ["__NONE__"] } },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_switch",
+                "custom_action_param": { "which": "auto", "on": false, "scene": "wuchong", "scope": "battle", "on_unknown": "" }
+            }
+        },
+        "post_delay": 800,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongBattle",
+            "WuchongSettleContinue",
+            "WuchongSettleReturnRoom",
+            "WuchongSettleDisband",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    // ------------------------------------------------------------- 手操战斗
+    "WuchongBattle": {
+        // 【手操引擎】wuchong_battle：按 scene.wuchong.BATTLE_PARAMS 的节奏连点弹板 + 轮换放技能，
+        // 带战斗页安全阀。★只在「是否手操=手操」时启用★（选项把本节点 recognition 覆盖成 __NONE__）。
+        // ★coop-fix2 P0★：raw 默认本节点**关闭**（识别 = __NONE__）—— 手操引擎关 ⇔ 结点不被选中，
+        //   绝不空转重选。真机缺陷：raw 默认下本节点在手操引擎关时照样命中 → 动作收到空识别框
+        //   （框架 WRN「custom action target rect is empty」）且 manual=off → ×13 空框空转、无一次
+        //   点击落地。界面「是否手操=手操」的 case **显式开启**本节点（识别回到 wuchong_state）
+        //   并把动作 custom_action_param.manual=true（确定性手动，不依赖会话里的自动开关）。
+        // ★动作只用场景几何（scene.wuchong.WUCHONG_BATTLE centre/flipper），绝不用识别的空框★。
+        // ★不设 max_hit★（一整局会反复命中）。post_delay 比一轮稍短，让自环继续。
+        // ★本票 #71★：next 最前插 WuchongBattleAutoOff（进战斗先兜一次「战斗页关自动」；
+        //   编队页关不住 —— 游戏会在战斗里又打开）。顺序 = scene.wuchong.step_next("WuchongBattle")。
+        "recognition": { "type": "OCR", "param": { "expected": ["__NONE__"] } },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "wuchong_battle", "custom_action_param": {} }
+        },
+        "post_delay": 300,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongBattleAutoOff",
+            "WuchongBattle",
+            "WuchongSettleContinue",
+            "WuchongSettleReturnRoom",
+            "WuchongSettleDisband",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    // ------------------------------------------------------------- 开房导航链路
+    "WuchongNavLord": {
+        // 主城 → 领主战（OCR 点按钮框中心，不用死偏移）。
+        // ★#56 真机修复★ inline all_of 的叶子必须写成 {"recognition": {type, param}}（与
+        //   farm.json 同形）；写成 {"type":..,"param":..} 会被 MAA 当作 **DirectHit** 解析
+        //   （两片叶子都变全屏 DirectHit → 节点在任何画面都命中 → 点到全屏框的错点）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": [
+                    {
+                        "recognition": {
+                            "type": "Custom",
+                            "param": {
+                                "custom_recognition": "wuchong_state",
+                                "custom_recognition_param": { "state": "main_city", "ocr_entry": "OcrTask" }
+                            }
+                        }
+                    },
+                    { "recognition": { "type": "OCR", "param": { "expected": ["^领主战$"] } } }
+                ],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1000,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongNavJoss",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongJossTabText": {
+        // 「降临讨伐」页签（ROI 限顶部页签行，避开列表行同名前缀）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["降临讨伐"], "roi": [360, 375, 360, 60] }
+        }
+    },
+    "WuchongNavJoss": {
+        // 列表页 → 降临讨伐页签 → 点页签文字本身。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongLordState", "WuchongJossTabText"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1000,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongNavRow",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongNavRow": {
+        // 列表页：当前能看到「五王连战」行（模板命中）就点它（box_index=1 → 点模板框中心）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongLordState", "WuchongRowBanner"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1000,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongScrollList",
+            "WuchongDetailFight",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongScrollList": {
+        // 列表页：看不到目标行 → 上滑列表继续找（自环回 WuchongNavRow）。★不设 max_hit★。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_lord_list", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Swipe",
+            "param": { "begin": [360, 900], "end": [360, 520], "duration": 500 }
+        },
+        "post_delay": 600,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongNavRow",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongDetailFight": {
+        // 详情页（★模板门控：确在五重·超级 详情页★）→ 点「战斗」进模式选择。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongDetailState", "WuchongDetailBanner"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^战斗$"],
+                    "roi": [0, 440, 420, 640],
+                    "expect": ["wuchong_mode", "loading"]
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongModeSolo",
+            "WuchongModeMulti",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    // ------------------------------------------- 模式页两张卡（#116：每张卡只准点自己）
+    // ★真机病（#116，2026-10-18 07:17:55）★ `[wuchong_act] state=wuchong_mode 点击 '多人游戏'
+    //   @720(437,866)` → 进共斗房。★归因核对过★：那一枪框架行是 `node_name=WuchongModeMulti`，
+    //   即多人卡那一支（那次的选项是默认值「多人」），点多人**是对的**；**但结构病是真的**：
+    //   两个模式节点的识别**完全同形**（都只认 `wuchong_state == wuchong_mode`，
+    //   classify() 里「屏幕上有单人**或**多人」就算模式页）⇒ 站在模式页上**两个都命中**，
+    //   谁被选中只取决于「另一张卡有没有被 options override 关成 __NONE__」。
+    //   于是「单人路径」= 「关掉多人」**实现**的 —— WuchongModeSolo 自己从没被单独验证过（假安全）。
+    //   落地：每张卡的识别额外要求**自己那颗标题**（下面两个 OCR 叶子），
+    //   只看到「多人游戏」的帧上 WuchongModeSolo **不命中**（反例见 hooks_116）。
+    "WuchongSoloText": {
+        // 模式页【单人游戏】卡片标题。★整串锚定★：`^单人游戏$` 既不会匹配「多人游戏」，
+        // 也不会误吃多人卡里被 OCR 拆成两半的「多人」「游戏」两颗子框。
+        "recognition": { "type": "OCR", "param": { "expected": ["^单人游戏$"] } }
+    },
+    "WuchongMultiText": {
+        // 模式页【多人游戏】卡片标题（同上，整串锚定）。
+        "recognition": { "type": "OCR", "param": { "expected": ["^多人游戏$"] } }
+    },
+    "WuchongModeSolo": {
+        // 模式页 → 单人游戏（默认；「游戏模式」选多人时本节点被覆盖成 __NONE__）。
+        // ★#116★ 识别 = And[模式页 state, **单人游戏标题**]：只有「多人游戏」在屏的帧**不命中**
+        //   （旧形态只认 state ⇒ 在自己的按钮根本不存在的页面上也会被派中 = 假安全）。
+        // ★#116★ 动作多一条**相对位置判据**（above）：目标中心必须在「多人游戏」框上方 ≥200px
+        //   —— 独立的第二道证据（OCR 把多人卡读成「单人游戏」时，位置仍能证伪它）。
+        //   几何真源 = scene.wuchong.SOLO_ABOVE / MODE_MIN_SOLO_ABOVE_MULTI_DY（三帧实测 Δy≈343）。
+        // ★#116★ expect 去掉 `wuchong_room`：单人**没有**共斗房，把「进了共斗房」判成
+        //   「校验通过」正是这条线的假成功形态（旧形态写的是从 ModeMulti 抄来的三条）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongModeState", "WuchongSoloText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^单人游戏$"],
+                    "above": { "what": ["^多人游戏$"], "min_dy": 200 },
+                    "expect": ["wuchong_team", "loading"]
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamAutoSet",
+            "WuchongTeamContSet",
+            "WuchongTeamChallenge",
+            "WuchongRoomWait",
+            "WuchongBattle",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongModeMulti": {
+        // 模式页 → 多人游戏（「游戏模式」选单人时本节点被覆盖成 __NONE__）。
+        // ★#116★ 识别 = And[模式页 state, **多人游戏标题**]（与单人卡对称）：只有单人卡在屏的帧
+        //   **不命中**。动作的 `what` 仍是整串锚定 —— 两张卡各自的字符串谁也匹配不到谁。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongModeState", "WuchongMultiText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^多人游戏$"],
+                    "expect": ["wuchong_room", "wuchong_team", "loading"]
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamAutoSet",
+            "WuchongTeamContSet",
+            "WuchongRecruitOpen",
+            "WuchongRoomWait",
+            "WuchongBattle",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongRecruitOpen": {
+        // 房间页 → 招募（点 OCR 到的招募按钮）。
+        // ★P0 修复（coop-fix2）★：
+        //   · recognition 加 ``recruit_state: "not_started"`` —— 只在房间显示「未进行招募」时命中
+        //     （已开始招募时不再重开弹窗，房间安心等人齐）；
+        //   ★#79 修复（真机「打几把画面卡死」的真凶）★：**不许设 ``max_hit``** —— MAA 的 `max_hit`
+        //     是**整任务共享**的计数器（#50 教训），真机 18:33:45 / 18:45:44 / 19:06:16 恰好点满 3 次
+        //     之后，第 4 间房起本节点被**静默跳过**（不报错、不打印）→ 房间永远停在「未进行招募」
+        //     → 别人进不来 → 「挑战」永远灰 → 干等 ``room_wait_sec``(300s) 收工。
+        //     现在的界：``latch: "recruit_open"``（时间闩锁，≤1 次/LATCH_RETRY_S=8s，永不失效）
+        //     + ``recruit_state: "not_started"``（点成功 → 房间变「招募中」→ 本节点自然不再命中）
+        //     + ``WuchongGiveUp.room_wait_sec`` 的带原因收工。
+        //   · ``next`` 把 ``WuchongRecruitStart`` 提到 ``WuchongTeamAutoSet`` 之前 —— 招募方式
+        //     弹窗在屏时先走「开始招募」（真机缺陷：先走自动开关会点在弹窗背板上，把招募点掉）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": {
+                    "state": "wuchong_room",
+                    "recruit_state": "not_started",
+                    "ocr_entry": "OcrTask"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^招募$"],
+                    "latch": "recruit_open",
+                    "expect": ["wuchong_recruit_dialog", "wuchong_room"]
+                }
+            }
+        },
+        "post_delay": 800,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongRecruitStart",
+            "WuchongTeamAutoSet",
+            "WuchongTeamContSet",
+            "WuchongRoomWait",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongStartText": {
+        "recognition": { "type": "OCR", "param": { "expected": ["^开始招募$"] } }
+    },
+    "WuchongRecruitStart": {
+        // 招募方式弹窗 → 开始招募。★只点一次★（latch=recruit_start 闩锁）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongRecruitDialogState", "WuchongStartText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^开始招募$"],
+                    "latch": "recruit_start",
+                    "expect": ["wuchong_room", "wuchong_battle", "loading"]
+                }
+            }
+        },
+        "post_delay": 800,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamAutoSet",
+            "WuchongTeamContSet",
+            "WuchongRoomWait",
+            "WuchongBattle",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongCoopChallenge": {
+        // ★coop-fix2 P0★：共斗房 → 挑战（人齐 = 已招募到队友；「挑战」由灰转亮）。
+        //   ★多人专用★：raw 默认**关闭**（识别 = __NONE__），由界面选项「游戏模式=多人游戏」开启；
+        //   「游戏模式=单人游戏」保持关（单人没有共斗房）。与 WuchongBattle 的 raw-关 / 选项-开同形。
+        //   ▲为什么单人的 WuchongTeamChallenge 顶不了它▲：共斗房的「挑战」在 720 中心 y≈929
+        //   （真机帧 box≈[297,906,81,46]），单人编队页的「挑战」在 y≈1092（box≈[297,1069,80,47]）；
+        //   单人节点的 roi y>980 **永远点不到房间里那颗**（#56 单人校验 + #30 共斗房帧）。缺了本节点，
+        //   多人就算招募成功也**永远开不了战**（在房里等到有界收工）。
+        //   条件门控（recruit_state=started）：只在**已有人**（去掉「未进行招募」）时命中，绝不点灰按钮。
+        //   ★#116 改判（真机 7 连点）★：旧注释写「不设 latch（怕一次性闩锁被第一次过早点击烧掉）」——
+        //     那个顾虑对「一次性闩锁」成立，但本仓的 ``latch`` 是**有界重试窗口**（≤1 次/窗口，
+        //     超窗仍停在同一颗按钮=上次没点中→允许重试），**不会**被烧掉 ⇒ 该顾虑不成立。
+        //     真机（07:18:14–07:18:45）连点 **7 次**「挑战」每次 expect 都失败（灰按钮闪 loading 回房）：
+        //     框架日志里 ``node_name=WuchongCoopChallenge`` 的 ``CustomAction::run ... | enter`` 也是 7 行
+        //     ⇒ 不是动作内循环，是**节点被反复命中**。修法 = 跨命中的时间闩 ``latch: coop_challenge``
+        //     （窗口 8s，真源 scene.wuchong ②e'；必须 > 房间页一轮的实测周期 5.2s，否则闩锁不生效）。
+        //     有界性不变：``WuchongGiveUp.room_wait_sec``（300s）→ 约 37 次机会后带原因收工。
+        //   ★#78 节拍★：真机（install/logs/log-20261017.log 18:33:59 / 18:34:19 / 18:34:38）
+        //     **人齐→开战 63s** 的真因是**延时**不是识别：本节点 ``post_delay: 12000`` +
+        //     ``timeout: 12000``（空转重试）⇒ 一次尝试 ≈20s。现压到 post_delay 600ms /
+        //     timeout 3000ms，房间页自己的轮询也压到 800ms（原 3500）—— 人齐后 ≤1s 就能点上。
+        //     有界性仍由 ``WuchongGiveUp.room_wait_sec``（300s）保证。
+        //   ★#110★ 点击判据真源 = scene/challenge.py::CHALLENGE_CLICK_PATTERNS：`挑战` / `挑战→`
+        //     两种渲染都认。★这一颗正是箭头症状的现场★：识别调研里带箭头样本的框
+        //     [297,905,156,47] 与本节点的共斗房「挑战」（[297,906,81,46]，中心 y≈929）同高
+        //     —— 旧形状 `^挑战$` 在带箭头的那一半帧上点不中，多人就永远开不了战。
+        "recognition": { "type": "OCR", "param": { "expected": ["__NONE__"] } },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^挑战(→)?$"],
+                    "roi": [150, 820, 600, 980],
+                    // ★#116★ 时间闩（跨命中，≤1 次/8s）：真机 07:18:14–07:18:45 连点 7 次的修法。
+                    //   窗口真源 = scene.wuchong.COOP_CHALLENGE_LATCH_S（8s > 房间页一轮实测周期 5.2s）。
+                    "latch": "coop_challenge",
+                    // ★#77★ expect 里**去掉 loading**：灰「挑战」点了会闪一下 loading 又回房 —— 那是假成功。
+                    "expect": ["wuchong_battle"]
+                }
+            }
+        },
+        "post_delay": 600,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamAutoSet",
+            "WuchongTeamContSet",
+            "WuchongRoomWait",
+            "WuchongBattle",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongRoomWait": {
+        // 房间内等待（已开始招募、队友未到齐）：只等待，绝不连环点。★不设 max_hit★。
+        // ★P0 修复（coop-fix2）★：不再「只等待」——next 首项 ``WuchongRecruitOpen`` 给房间一条
+        //   回「招募 / 开始招募」的边（有界：``WuchongRecruitOpen`` 带 max_hit，且只在
+        //   「未进行招募」时命中）。人齐 → ``WuchongTeamChallenge``；开战 → ``WuchongBattle``。
+        //   停留过久仍未开战 → ``WuchongGiveUp``（room_wait_sec）有理由收工，绝不无限死等。
+        //   （等待本身靠自环持续 —— 仍★不设 max_hit★；有界性由 RecruitOpen.max_hit + giveup 保证。）
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "wuchong_state",
+                "custom_recognition_param": { "state": "wuchong_room", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 800,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongCoopChallenge",
+            "WuchongRecruitOpen",
+            "WuchongTeamAutoSet",
+            "WuchongTeamContSet",
+            "WuchongTeamChallenge",
+            "WuchongRoomWait",
+            "WuchongBattle",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    // --------------------------------------------------- 编队页开关（自动 / 自动续战）
+    // ★二批（运维裁决②）★：检查点从「战斗内(暂停→自动滑块)」**移到战斗外的编队页/房间页**，
+    //   且「自动」按钮一律**定位**（模板/OCR）后读状态、点识别框中心 —— 不同页面位置不同。
+    //   recognition = auto_switch_state（**条件门控**：只在状态**不对**时命中，故放在候选最前
+    //   也不会死循环，且房间页/编队页都覆盖得到）。
+    "WuchongTeamAutoSet": {
+        // 编队页/房间页「自动」：★按「是否手操」决定开/关★（选项覆盖 recognition.state 与 action.on）；
+        // 默认 = 确保「开」（state=off 才命中 → 只在当前是关时去开）。
+        // wuchong_switch 对非五重场景一律夹回「开」（跨模式规则）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "auto_switch_state",
+                "custom_recognition_param": { "label": "自动", "state": "off", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_switch",
+                "custom_action_param": {
+                    "which": "auto",
+                    "on": true,
+                    "scene": "wuchong",
+                    "on_unknown": "click"
+                }
+            }
+        },
+        "post_delay": 800,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamContSet",
+            "WuchongTeamChallenge",
+            "WuchongRoomWait",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongTeamContSet": {
+        // 编队页/房间页「自动续战」：★确保【关】★（ruling ③：「自动续战的功能我不太想打开」）。
+        // recognition = auto_switch_state（label=自动续战, state=on）→ **只在当前是开**时命中并去关；
+        // 已是关（默认）则不动。「自动续战功能」确认框由动作先按『取消』处理（绝不打开功能）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "auto_switch_state",
+                "custom_recognition_param": { "label": "自动续战", "state": "on", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_switch",
+                "custom_action_param": {
+                    "which": "cont",
+                    "on": false,
+                    "scene": "wuchong",
+                    "on_unknown": "click"
+                }
+            }
+        },
+        "post_delay": 800,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongTeamChallenge",
+            "WuchongRoomWait",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongChallengeText": {
+        // ★#110★ 编队页底部【挑战】的 OCR 门。判据真源 = scene/challenge.py::CHALLENGE_CLICK_PATTERNS：
+        //   整串锚定 + 至多一个箭头（真机帧有 `挑战` / `挑战→` 两种渲染，8/17 帧带箭头）。
+        "recognition": { "type": "OCR", "param": { "expected": ["^挑战(→)?$"], "roi": [150, 980, 600, 1180] } }
+    },
+    "WuchongStaleTeam": {
+        // ★coop-fix2 P0★：多人模式下落在【本轮从未进过共斗房】的**单人编队页**（stale：上一轮
+        //   单人留下的队伍页）→ 点「返回」离开、重走模式选择；绝不把它底部的「挑战」当成多人的。
+        //   真机 07:45 leg_b 复盘：`--mode 多人`，可设备停在上轮单人的编队页，入口枢纽直接把
+        //   「挑战」点了 → **又打一局单人**（`WuchongModeSolo` 已被选项关掉也不管用，因为整条
+        //   流程根本没走到模式页）。判据用「本轮是否进过房」把 stale 编队页与「人齐编队页」分开。
+        //   ★多人专用★：raw 默认关闭（__NONE__），由「游戏模式=多人游戏」开启；单人下编队页合法。
+        //   ★#79★ **不许 ``max_hit``**（整任务共享计数，第 4 次起本节点静默失效 → 再也不会离开
+        //     stale 编队页，直接卡死）。改用时间闩锁 ``latch: "stale_team"``（≤1 次/8s，永不失效）。
+        "recognition": { "type": "OCR", "param": { "expected": ["__NONE__"] } },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^返回$"],
+                    "roi": [0, 1180, 160, 1280],
+                    "latch": "stale_team",
+                    "expect": ["wuchong_mode", "wuchong_detail", "wuchong_lord_list", "main_city"]
+                }
+            }
+        },
+        "post_delay": 800,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongEntry",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+    "WuchongTeamChallenge": {
+        // 编队页 → 挑战（多人时是「人齐了」才可点）。★只点一次/局★（latch=battle_start）。
+        // ★#78 节拍★：与共斗房同理 —— 真凶是 ``post_delay: 12000`` + ``timeout: 12000``
+        //   （实测一次尝试 ≈20s），现压到 600 / 3000。动作仍是「点一次 + 立刻校验」。
+        // ★#110★ 点击判据真源 = scene/challenge.py::CHALLENGE_CLICK_PATTERNS（`挑战` / `挑战→`
+        //   两种渲染都认；整串锚定，绝不裸「挑战」）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["WuchongTeamState", "WuchongChallengeText"], "box_index": 1 }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^挑战(→)?$"],
+                    "roi": [150, 980, 600, 1180],
+                    "latch": "battle_start",
+                    // ★#77★ 同共斗房：loading 是过渡帧，不算「已开战」。
+                    "expect": ["wuchong_battle"]
+                }
+            }
+        },
+        "post_delay": 600,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongBattle",
+            "WuchongRoomWait",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    // ------------------------------------------------------------- 兜底
+    "WuchongRoomLeave": {
+        // ★#83★ 单人模式的「房间出口」：`游戏模式=单人` 时任何共斗房间都是**上一轮遗留**的
+        //   （单人链路里根本不会进房），必须能自己走出去 —— 否则房间页没有任何可命中节点
+        //   （`WuchongCoopChallenge` / `WuchongStaleTeam` 都是多人专用），只能干等
+        //   ``WuchongGiveUp.room_wait_sec``(300s) 收工（真机 debug/wc_solo_10.log：90s+ 零点击）。
+        //   ★raw 默认关★（默认模式是多人，多人下房间是合法的，绝不能自己退）；由「游戏模式=单人游戏」
+        //   case 显式打开（与 WuchongCoopChallenge 的「多人专用」同构，方向相反）。
+        //   动作：点房间左下【返回】（720 roi [0,1180,160,1280]），落到模式/详情/列表/主城都算成功；
+        //   时间闩锁 ``latch: room_leave``（≤1 次/LATCH_RETRY_S，永不失效 —— ★不许 max_hit★）。
+        "recognition": { "type": "OCR", "param": { "expected": ["__NONE__"] } },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "wuchong_act",
+                "custom_action_param": {
+                    "what": ["^返回$"],
+                    "roi": [0, 1180, 160, 1280],
+                    "latch": "room_leave",
+                    "expect": ["wuchong_mode", "wuchong_detail", "wuchong_lord_list", "main_city"]
+                }
+            }
+        },
+        "post_delay": 600,
+        "next": [
+            // ★#103-R1b★ 本步的候选 = **真后继**（进度由它提供）+ **末位**万能跳转（DirectHit，★必须末位★）。
+            //   验证器（WuchongIn*）已退回本职：只被 SceneEnterWuchong 用做「到达确认」，不再进业务 next。
+            "WuchongEntry",
+            "[JumpBack]SceneEnterWuchong"
+        ],
+        "on_error": ["WuchongEntry"],
+        "timeout": 3000
+    },
+
+    "WuchongWait": {
+        // 认不出的画面：只等待，绝不盲目点击。★最后的 DirectHit 万能兜底★（永远无限可用）。
+        // ★绝不可加 max_hit★（用尽后会被永久跳过 → Tasker.Failed；见 abyss.json 的血泪教训）。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 400,
+        "next": ["WuchongEntry"]
+    }
+}

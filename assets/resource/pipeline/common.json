@@ -1,0 +1,1076 @@
+{
+    // PubReturnHome：归位（#8 提升为通用事件）—— 由 scene.events 声明，#10 落进 pipeline。
+    // 判据/动作照抄 recover.json::RecoverTapMainCityNav。
+    // ★#18 修正：兜底型判据不得自匹配目标状态★
+    //   原判据只认底部导航「主城」（OCR ^主城$ + ROI [0,1180,720,100]）。但主城页常驻的
+    //   底部导航标签「主城」实测 720 box=[157,1248,44,25]、中心 (179,1260) 正落在该 ROI 内
+    //   → 在主城上【必然自匹配】→ 作为优先前缀注入时点空 → [JumpBack] 重扫 → 死循环
+    //   （#13 真机实证：370 节点全 PubReturnHome、7 分钟没离开主城）。现改为 And：
+    //     · ^主城$ 在底部导航 ROI —— 「回主城」入口（底部导航）还在；
+    //     · ^返回$ 在底部导航【最左槽】ROI [0,1180,110,100] —— 说明当前是【非主城】子页面
+    //       （主城页最左槽是「主角色」；列表页 / 详情页最左槽是「返回」，实测 r1/r2/r3）。
+    //   于是归位只在非主城页面命中，在主城上恒不命中（不再自匹配）。
+    //   box_index=0 让点击仍落在「主城」标签框中心 —— 动作与原来一致，只是入口收紧。
+    // ★#29 进一步收紧★：#18 的两叶 And 在【链上步骤页面】上仍成立（列表页 / 详情页也有
+    //   「返回 + 主城底导」）→ 兜底归位在「目标行在屏幕外」时抢跑，滚动找行的
+    //   SpecialScrollList 永不执行。追加第三条子识别 PubReturnHomeOtherSection：当前一级
+    //   分区不是主城（底导里另一个分区页签橙色高亮）。主城分区的任何页面（含链上所有步骤页）
+    //   都是「主城」页签高亮 → 第三条为假 → 归位不命中。
+    "PubReturnHomeText": {
+        // 归位判据·子识别①：底部导航「主城」（回主城入口还在）。仅作 PubReturnHome 的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^主城$"], "roi": [0, 1180, 720, 100] }
+        }
+    },
+    "PubReturnHomeBackTab": {
+        // 归位判据·子识别②：底部导航【最左槽】「返回」—— 说明当前是【非主城】子页面；
+        // 主城页最左槽是「主角色」、没有「返回」（实测 pre_shot vs r1/r2/r3）。这是把主城排除掉的那条。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^返回$"], "roi": [0, 1180, 110, 100] }
+        }
+    },
+    // 归位判据·子识别③（#29）：当前一级分区**不是主城**。
+    //   #29 真机实证：领主战列表页 / 详情页同样「有主城底导 + 有返回」→ 仅凭前两条
+    //   会让归位在这些【链上步骤页面】上自匹配：目标行在屏幕外时 SpecialEnterBoss 不命中
+    //   → 兜底归位抢跑 → 点主城 → 枢纽重进；而滚动找行的 SpecialScrollList 永不执行。
+    //   MAA 识别没有 Not，故用【正向】判据表达「不在主城分区」：底部导航里**另一个**
+    //   一级分区页签处于选中态（橙色高亮）。底导六槽 [上下文][主城][角色][商店][扭蛋][菜单]，
+    //   仅被选中一级分区页签是橙色、其余灰。主城分区的**任何**页面（含链上所有步骤页）
+    //   都是「主城」页签高亮、其余四槽灰 → 本判据为假 → 归位不命中。
+    //   实测（真机 127.0.0.1:16385，720 空间；见 tools/contract_hooks/hooks_29.py）：
+    //     主城分区页四个其它页签橙色像素 = 0；扭蛋分区页「扭蛋」页签 = 918。
+    //   ROI = 各页签标签框；lower/upper = 选中态橙色；count 阈值远低于实测值、远高于 0。
+    //   ★为什么拆成四个具名 ColorMatch 子节点 + 具名 Or★：MAA 5.13.1 对 Or.any_of 里的
+    //   【内联】识别对象会退化成 DirectHit（实测），故这里一律用具名节点引用（字符串）。
+    "PubReturnHomeTabChar": {
+        // 子识别③-a：底导「角色」页签处于选中态（橙色）→ 当前在角色分区。
+        "recognition": { "type": "ColorMatch", "param": { "roi": [275, 1244, 46, 29],
+            "method": 4, "lower": [190, 90, 0], "upper": [255, 205, 115], "count": 50 } }
+    },
+    "PubReturnHomeTabShop": {
+        // 子识别③-b：底导「商店」页签选中（橙色）。
+        "recognition": { "type": "ColorMatch", "param": { "roi": [397, 1246, 43, 26],
+            "method": 4, "lower": [190, 90, 0], "upper": [255, 205, 115], "count": 50 } }
+    },
+    "PubReturnHomeTabGacha": {
+        // 子识别③-c：底导「扭蛋」页签选中（橙色）。
+        "recognition": { "type": "ColorMatch", "param": { "roi": [516, 1246, 45, 26],
+            "method": 4, "lower": [190, 90, 0], "upper": [255, 205, 115], "count": 50 } }
+    },
+    "PubReturnHomeTabMenu": {
+        // 子识别③-d：底导「菜单」页签选中（橙色）。
+        "recognition": { "type": "ColorMatch", "param": { "roi": [636, 1248, 45, 25],
+            "method": 4, "lower": [190, 90, 0], "upper": [255, 205, 115], "count": 50 } }
+    },
+    "PubReturnHomeOtherSection": {
+        // 子识别③：其余四个一级分区页签里有一个处于选中态 = 当前**不在主城分区**。
+        "recognition": {
+            "type": "Or",
+            "param": {
+                "any_of": [
+                    "PubReturnHomeTabChar",
+                    "PubReturnHomeTabShop",
+                    "PubReturnHomeTabGacha",
+                    "PubReturnHomeTabMenu"
+                ]
+            }
+        }
+    },
+    "PubReturnHome": {
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": [
+                    "PubReturnHomeText",
+                    "PubReturnHomeBackTab",
+                    "PubReturnHomeOtherSection"
+                ],
+                "box_index": 0
+            }
+        },
+        "action": {
+            "type": "Click",
+            "param": {}
+        },
+        "post_delay": 500,
+        "next": []
+    },
+
+    // 公共识别节点 —— 供 agent 里的自定义识别器通过 context.run_recognition 复用。
+    // 不入任何 next 分派，只作为「入口节点」被 run_recognition 调用。
+    //
+    // OcrTask：全屏 OCR（expected [".*"] 即返回所有文本框）。
+    //   agent/my_reco.py 的 stage_next / stage_all_done / next_stage 都默认用它取图，
+    //   而此前项目里并没有任何节点叫 OcrTask —— 所以那套「已打关卡记录」其实一直
+    //   取不到 OCR 结果（静默失败）。这里补上，主线与外传的账本机制才真正可用。
+    "OcrTask": {
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": [".*"] }
+        },
+        "action": { "type": "DoNothing", "param": {} }
+    },
+
+    // PubClick：通用「按框点击」入口 —— 由 agent 通过
+    //   context.run_action("PubClick", box=(cx-1, cy-1, 2, 2))
+    // 调用（box 为 720 空间；target=true 表示点框中心）。不入任何 next 分派。
+    // ★为什么需要它（真机实测）★：部分 MaaFramework 原生库（MFAAvalonia 随包）未导出
+    //   ``MaaControllerPostClickV2``，Python binding 的 ``controller.post_click`` 会直接
+    //   ACCESS_VIOLATION 崩溃（2026-09-28 log-20260928 里 18 连崩的堆栈）。
+    //   改走框架原生 Click 动作则版本无关、且无需 ctypes 直连。PhantomClick 是同一招，
+    //   保留兼容；新增代码统一用本节点。
+    "PubClick": {
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "Click", "param": { "target": true } }
+    },
+
+    // AutoSwitchLabel：编队页 / 房间页「自动」按钮的**标签裁片**（#56 二批）。
+    //   「自动」这个东西**不同页面位置不同**（编队页左下 (142,1062) / 共斗房间页右上
+    //   (630,102)），所以绝不能写死坐标 —— 自定义识别 auto_switch_state / auto_switch 经
+    //   context.run_recognition("AutoSwitchLabel", image) 复用它来**定位**标签框，
+    //   再由标签框推出状态探针与点击点（模板优先，OCR 整串 ^自动$ 兜底）。
+    //   裁片自证/跨帧（离线 ZNCC）：1.000 @(142,1062)（编队页，两张已入库真机帧）；
+    //   五重编队页 0.997 / 深渊EX 0.997（同位置）。
+    //   不入任何 next 分派，只作为 run_recognition 的入口节点。
+    //
+    //   ★#108★ 为什么这里必须有 roi + 显式 order_by（缺一个就会真机点错）★
+    //   （1）threshold 是**入闸门**（"这个位置算不算命中"），**不是"取最高分"**；多结果时选哪个
+    //       由 order_by + index 决定，**缺省 Horizontal + 0 = 最左**，不是最像。
+    //   （2）没有 roi = 全屏候选池 = 把**同排兄弟控件「自动续战」**也放进来：真「自动」
+    //       1.0000@x=142、假「自动续战」0.8964@x=17（两张已入库真机帧实测），两人都过 0.75
+    //       ⇒ 默认语义下**必选 x=17**（[17,1062,43,26] 那次误点，机制上就是这么发生的）。
+    //       旧注释写的「自动续战最高 0.470」是**尺度不一致**测出来的假数，真机是 0.8964。
+    //   （3）roi [100,1030,130,90] = **只框「自动」那一栏**（720 空间）：它完整包含正例窗口
+    //       (142,1062,43,26)（四边余量 42/45/32/32px），而左边界 100 把「自动续战」整栏
+    //       （标签 x≈17..97）排除 → roi 内 ≥0.75 的候选**只剩「自动」一个**。
+    //       副作用（如实登记）：房间页右上 (630,102) 落在 roi 外 → 房间页改走 OCR ^自动$ 兜底。
+    //   （4）order_by: "Score" 是**语义防线**：要"最像"而不是"最左"；roi 已让候选取一，但这一条
+    //       写死才能兜住将来 roi 放宽 / 框架默认值变更。真源 scene/auto_switch.py 的
+    //       AUTO_LABEL_ROI / AUTO_ORDER_BY，两处必须逐项相等（守卫 hooks_108）。
+    "AutoSwitchLabel": {
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": ["auto/switch_label.png"],
+                "threshold": 0.75,
+                "roi": [100, 1030, 130, 90],
+                "order_by": "Score"
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} }
+    },
+
+    // ==========================================================================
+    // 公共「换日弹窗」—— 全项目唯一一份
+    //
+    // 背景：此前 9 个 pipeline 各写了一份完全相同的「日期变了」弹窗逻辑
+    // （Raid/Farm/Push/Pull/Gacha/Side/Special/Recover/Phantom *DailyPopup），
+    // 现已收敛到这里，避免以后各自改动导致行为不一致。
+    //
+    // ★调用方式（真机实测过的写法，别自己猜）★
+    //   调用者 next 里写 "[JumpBack]PubDailyPopup"（前缀形式）。
+    //   —— 普通名字引用本来就是跨文件；加上 [JumpBack] 前缀表示「执行完这个
+    //      子链后回到调用者 next 从头重扫」。
+    //   ✗ 不要用 anchor:true ✗：那是另一套「锚点表」机制，名字必须被某个节点用
+    //     anchor 字段设过，没设过会被静默跳过（实测 get_pipeline_data failed）。
+    //
+    // ★本节点是【叶子型】★
+    //   next 必须为 []：处理完（点掉弹窗）后弹窗消失 → 自然不再命中。
+    //   绝不能把 next 指向本文件/任何分派器（否则永不返回 = 白写）。
+    //
+    // ★循环风险与取舍★
+    //   正常情况：命中→点 OK→弹窗消失→重扫不再命中，不会循环。
+    //   极端情况：若输入冻结导致点了 OK 弹窗也不消失，本节点会以 ~1.7s 节奏重复点击。
+    //     这里【故意不设 max_hit】：它虽是节点级、但任务内全局共享，设上限会在长任务里
+    //     「用满即静默跳过」→ 之后真正的换日弹窗也无人处理（比重复点击更糟）。
+    //     重复点击在输入恢复后往往能自行成功，故保留【无限重试】语义。
+    //     已知取舍：调用它的分派链把本节点放在最前，因此上述「弹窗不消失」时它会挡住
+    //     其后的卡死自恢复节点（side/special/phantom）—— 这是「最临时全局打断优先」的代价。
+    //
+    // ★判据保持精确★：^日期变了$（绝不宽匹配，否则会误点该弹窗的「返回标题」
+    //   把游戏踢回标题页 —— 历史踩过的坑）。
+    //   必须【同时】命中标题 ^日期变了$ + 按钮 ^OK$ 才动（双保险，确保弹窗完整在屏）。
+    //   ★点击目标固定两点式 [359,823] = 【OK】按钮中心★
+    //   （【返回标题】在 (359,592)，绝不可点；真实样本 date_16384.png）。
+    // ==========================================================================
+    "PubDailyText": {
+        // 「日期变了」弹窗·标题判据：仅作 PubDailyPopup 的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^日期变了$"] }
+        }
+    },
+    "PubDailyOk": {
+        // 「日期变了」弹窗的【OK】按钮：直接 OCR 按钮文字本身（绝不点返回标题）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^OK$"] }
+        }
+    },
+    "PubDailyPopup": {
+        // 公共换日弹窗：全局打断，任何画面下都可能弹。调用者用 [JumpBack] 前缀调用。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubDailyText", "PubDailyOk"] }
+        },
+        "action": { "type": "Click", "param": { "target": [359, 823] } },
+        "post_delay": 1500,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「加载等待」—— 全项目唯一一份
+    //
+    // 背景：此前 7 个 pipeline 各写了一份完全相同的「请耐心等待」等待逻辑
+    // （Push/Gacha/Pull/Raid/Recover/Side/Special 各自的 *LoadingWait），
+    // 现已收敛到这里，避免以后各自改动导致行为不一致。
+    //
+    // ★调用方式（与 PubDailyPopup 同一套写法，实测过的）★
+    //   调用者 next 里写 "[JumpBack]PubLoadingWait"（前缀形式）。
+    //   —— [JumpBack] 表示「执行完这个子链后回到调用者 next 从头重扫」。
+    //   ✗ 不要用 anchor:true ✗：那是另一套「锚点表」机制，名字没被设过锚点会被
+    //     静默跳过（与前一轮换日弹窗踩过的坑相同）。
+    //
+    // ★本节点是【叶子型】★
+    //   next 必须为 []：它只等待、绝不改变画面，靠画面自己从加载页变成别的页来退出。
+    //   绝不能把 next 指向任何分派器（否则永不返回 = 白写）。
+    //
+    // ★判据保持精确/半精确★："请耐心等待"（4 字特征文案，非宽匹配）。
+    //   真实加载页实测 OCR = "请耐心等待"（如 ph_w_0544_loading.png 720 (594,1217)）。
+    //   子识别 PubLoadingText 同时供 recover.json 的「期望画面」Or 判定复用。
+    //
+    // ★已知风险★：本节点是纯等待（DoNothing），绝不点击。
+    //   正常情况：加载完画面变化 → 重扫不再命中 → 继续后续流程。
+    //   极端情况：若画面永远停在加载页（网络卡死 / 游戏 hang），本节点会一直命中，
+    //     每 post_delay 秒空等一次、永不前进。有卡死自恢复节点的调用者（side/special
+    //     的 *StallRecover，stall_recover 默认 180s）里，本节点均排在卡死节点【之后】，
+    //     不会挡住 stall 兜底；无 stall 节点的调用者（如 recover）则与原
+    //     RecoverLoadingWait 行为一致（加载页不动就一直等）。加载页通常几秒内就会变化，
+    //     实测未出现永久停留。
+    // ==========================================================================
+    "PubLoadingText": {
+        // 「请耐心等待」加载页判据：PubLoadingWait 的子识别；也供 recover 复用。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["请耐心等待"] }
+        }
+    },
+    "PubLoadingWait": {
+        // 公共加载等待：只等待、不点击（见上方说明）。调用者用 [JumpBack] 前缀调用。
+        // post_delay 沿用原来的 3000（auto_push 原为 5000，统一为 3000：纯等待节点
+        // 恢复得更勤快一些；加载页仍在 → 会再次命中，行为等价）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubLoadingText"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「战斗中」判据 —— 全项目唯一一份（★★历史最危险的坑，改动前必读★★）
+    //
+    // 背景：此前 5 个 pipeline 各写了一份完全相同的「战斗中」判据
+    // （Push/Farm/Raid/Side/Special 各自的 *BattleTime/*BattleScore/*BattleWait），
+    // 现已把【判据本身】收敛到这里，避免以后各自改动导致行为不一致。
+    //
+    // ★★为什么必须带格式（血泪教训，绝对不许改回裸词）★★
+    //   早期判据用的是【裸】「时间」「分数」两个词：
+    //     结算页的奖励条目里同时含有「战斗分数」和「最长滞空时间6秒」，
+    //     于是「等战斗结束」在结算页恒为真 → 任务空转 32 分钟、1244 圈，
+    //     永远轮不到结算推进节点（真实事故，见 raid.json 坑点 6）。
+    //   修法就是【带格式】（原样照搬历史修好的版本）：
+    //     时间 \d+:\d+   —— 战斗 HUD 实测「时间 09:53」
+    //     分数 \d         —— 战斗 HUD 实测「分数 00000082254」
+    //   也【不能】用 ^时间$：战斗 HUD 是「时间 09:53」整体一个文本框，不是独立词，
+    //   两端锚定反而永远匹配不上。
+    //   ⇒ 改回裸词 = 重新引入 32 分钟死循环，绝对禁止。
+    //
+    // ★调用方式★
+    //   PubBattleTime / PubBattleScore 是【识别型】公共节点：不需要 [JumpBack]，
+    //   各文件的组合节点直接在 And.all_of 里写公共名即可（跨文件引用本来就成立，
+    //   先例：recover.json 的 Or.any_of 直接引用 PubLoadingText）。
+    //   PubBattleWait 是【动作型】公共节点（And + DoNothing + post_delay），
+    //   如需整组复用，用 "[JumpBack]PubBattleWait" 调用（叶子型，next: []）。
+    //
+    // ★当前 5 个文件为何仍保留各自薄薄的 *BattleWait 包装★
+    //   它们的 post_delay 与在分派链里的位置都是实机调过的（Raid 2000 / Side 3000 /
+    //   Special 3000 / Push 5000 / Farm 5000），故采取【最小改动】：
+    //   保留本文件的 *BattleWait 外壳，只把 all_of 的子识别换成
+    //   PubBattleTime / PubBattleScore。这样判据唯一、行为零变化。
+    //   注意：Raid/Special 的 *BattleWait 在分派链里必须【靠后】，
+    //   否则结算页的宽松等待会挡住结算推进节点（见 raid.json 坑点 6）。
+    // ==========================================================================
+    "PubBattleTime": {
+        // 战斗中 HUD「时间 09:53」判据。★必须带格式，见上方血泪教训★
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["时间 \\d+:\\d+"] }
+        }
+    },
+    "PubBattleScore": {
+        // 战斗中 HUD「分数 00000082254」判据。★必须带格式，见上方血泪教训★
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["分数 \\d"] }
+        }
+    },
+    "PubBattleWait": {
+        // 战斗中等待：And(时间, 分数) + DoNothing。整组复用时用 [JumpBack] 调用，叶子型。
+        // post_delay 取 3000（与本文件 PubLoadingWait 一致；各文件自留包装的实测值见上方说明）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubBattleTime", "PubBattleScore"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「结算继续」—— 结算页点掉「继续」/「OK」让结算往下走。全项目唯一一份判据
+    //
+    // 背景：此前 5 个 pipeline 各写了一份「结算页点继续/OK」逻辑
+    // （Push/Side/Special/Phantom 的 *ResultContinue + raid 的 RaidContinue/RaidSettlementExit），
+    // 现已把【判据】收敛到这里，避免以后各自改动导致行为不一致。
+    //
+    // ★判据原样照搬、绝不宽匹配★：^继续$ / ^OK$ 两端锚定。
+    //   （历史上宽匹配「OK/继续」曾误点在其它页面 —— 例如幻想结算页把 OK 排在
+    //     「继续挑战」之前会点错；故保持精确。）
+    //
+    // ★调用方式（两种，按调用者行为选）★
+    //   1) 【完全等价的调用者】next 里写 "[JumpBack]PubResultContinue"（前缀形式）。
+    //      这正是原来 next: ["<本文件分派器>"] 的语义（执行完回到调用者 next 从头重扫），
+    //      已逐文件确认调用者就是该分派器。适用于 auto_push / raid 的 OK 节点。
+    //   2) 【带自定义动作或额外 next 的调用者】保留本文件的薄包装节点，只把
+    //      recognition 换成 And(all_of: ["PubResultContinueText"])，动作/next 原样。
+    //      适用于 side（next 含记账节点 SideMarkDonePending，[JumpBack] 会绕过它）、
+    //      special（自定义动作 special_batch_finish 记批量账本）、
+    //      phantom（And 状态门控 + 自定义动作 phantom_act）。
+    //   ✗ 不要用 anchor:true ✗（与 PubDailyPopup/PubLoadingWait 同一坑）。
+    //
+    // ★本节点是【叶子型】★：next 必须为 []。结算页点掉后画面往下走、自然不再命中；
+    //   绝不能指向任何分派器（否则永不返回 = 白写）。
+    //
+    // ★动作：点自己的识别框中心（target: true）★
+    //   绝不用「识别框 + 死偏移」猜按钮（本项目踩过：偏移一抖点到【推荐编成】会改用户队伍）。
+    //   post_delay 取 1000（raid/side/special 原值；auto_push 原为 1200，统一为 1000）。
+    // ==========================================================================
+    "PubResultContinueText": {
+        // 结算页【继续】/【OK】按钮判据：仅作 PubResultContinue（及各文件薄包装）的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^继续$", "^OK$"] }
+        }
+    },
+    "PubResultContinue": {
+        // 公共结算继续：点「继续」/「OK」。完全等价的调用者用 [JumpBack] 调用，叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubResultContinueText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 1000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「QUESTRESULT 快进」—— 认出结算页顶部横幅就反复点，加速多段结算动画
+    //
+    // 背景：此前 5 个 pipeline 各写了一份「点顶部 QUESTRESULT 横幅快进」逻辑
+    // （Push/Side/Special/Phantom 的 *ResultFallback + raid 的 RaidQuestResult），
+    // 现已把【判据】收敛到这里，避免以后各自改动导致行为不一致。
+    //
+    // ★判据原样照搬★：OCR 子串 "QUESTRE"。
+    //   实测 OCR 常把 QUESTRESULT 截断成 "QUESTRE"，用子串可同时兼容截断与完整；
+    //   不要改回完整的 QUESTRESULT（否则截断帧漏判）。
+    //   （raid 原判据是完整 "QUESTRESULT"，改用子串 "QUESTRE" 后仍覆盖之，且更稳。）
+    //
+    // ★调用方式★
+    //   1) 完全等价的调用者用 "[JumpBack]PubQuestResult"（见各文件 next）。
+    //   2) 带自定义动作/额外 next 的调用者保留薄包装，recognition 换成
+    //      And(all_of: ["PubQuestResultText"])（side / special）。
+    //   本条只可能命中结算页（其它页面没有 QUESTRESULT），不会干扰战斗页/关卡选择页。
+    //
+    // ★本节点是【叶子型】★：next 必须为 []。
+    // ★动作：点横幅识别框中心（target: true）★ —— 横幅在屏幕顶部（实测约 720(541,129) /
+    //   phantom (360,86)），与底部按钮（y≈1200）空间完全分离，不可能误触继续挑战/OK。
+    //   pre_delay 100 / post_delay 300 沿用 raid / phantom 已验证的快速节奏（auto_push/side/special
+    //   原 post_delay 为 1000，收敛后更快；pure-OCR 横幅点击，无副作用）。
+    // ==========================================================================
+    "PubQuestResultText": {
+        // 结算页顶部 QUESTRESULT 横幅判据（子串，兼容 OCR 截断）：仅作子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["QUESTRE"] }
+        }
+    },
+    "PubQuestResult": {
+        // 公共结算快进：点顶部横幅本身。完全等价的调用者用 [JumpBack] 调用，叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubQuestResultText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "pre_delay": 100,
+        "post_delay": 300,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「跳过剧情」按钮 —— 剧情页右上角「跳过>」（判据全项目唯一一份）
+    //
+    // 背景：auto_push / raid / side_story 各写了一份完全相同的「点剧情页右上角跳过」
+    //   逻辑（PushSkipStory / RaidStorySkip / SideSkipStory），判据同为
+    //   OCR 子串「跳过」+ roi [500,0,220,130]，动作同为点自己的识别框。
+    //   现已收敛到这里，避免以后各自改动导致行为不一致。
+    //
+    // ★判据原样照搬、绝不宽匹配★
+    //   · 用【子串】「跳过」而非 ^跳过$：剧情页右上角实测 OCR = 「跳过>」，
+    //     两端锚定 ^跳过$ 会漏判（历史血泪）。
+    //   · roi [500,0,220,130] 必须保留：圈定右上角（实测 720 空间约 (613,31)/(655,47)），
+    //     避免误命中【跳过确认框】里那个「跳过」按钮。
+    //
+    // ★调用方式★
+    //   1) 完全等价的调用者 next 里写 "[JumpBack]PubSkipStory"（前缀形式）：
+    //      raid.json / side_story.json 的原节点 next 均为本文件入口，[JumpBack] 等价。
+    //   2) 非等价调用者【保留薄包装】只收敛判据：auto_push 的 PushSkipStory 同时被
+    //      farm.json 以普通名字引用，其原 next=["AutoPush"]（farm 用到时会转入
+    //      AutoPush 分派）；若改成 [JumpBack] 会改变 farm 的流转 → 保留薄包装。
+    //
+    // ★本节点是【叶子型】★：next 必须为 []。点掉右上角「跳过>」后会弹出【跳过确认框】，
+    //   本节点不再命中（确认框由各文件的确认节点各自处理，三者判据不同、未强行合并）。
+    // ★动作：点自己的识别框中心（target: true）★ —— 零偏移，绝不猜按钮。
+    //   post_delay 取 1200（side 原值；raid 原 800、push 原 1500 统一为 1200）。
+    // ==========================================================================
+    "PubSkipStoryText": {
+        // 剧情页右上角「跳过>」判据：仅作 PubSkipStory 及各文件薄包装的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["跳过"], "roi": [500, 0, 220, 130] }
+        }
+    },
+    "PubSkipStory": {
+        // 公共跳过剧情按钮：点右上角「跳过>」。完全等价的调用者用 [JumpBack] 调用，叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubSkipStoryText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 1200,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「挑战」按钮 —— 编队页底部「挑战」（★点击判据真源 = scene/challenge.py★）
+    //
+    // 背景：auto_push / farm / raid / side_story 各写了一份完全相同的「编队页点挑战」
+    //   逻辑（PushChallenge / FarmChallenge / RaidChallenge / SideChallenge），
+    //   判据同为「挑战」按钮的整串正则、动作同为点自己的识别框。现已收敛到这里。
+    //
+    // ★#110★ 判据真源 = scene/challenge.py::CHALLENGE_CLICK_PATTERNS。下面这个字面量
+    //   `^挑战(→)?$` 就是那份真源（本仓 pipeline 是**手写**的、不被整体生成 —— ADR-0001）：
+    //   要改判据，**先改真源再逐字同步到这里**（hooks_110 钉「逐字相等」，改一处就红）。
+    //   形状 = 整串锚定 + **只多容忍一个箭头**：真机帧里这颗按钮有 `挑战` / `挑战→` 两种
+    //   渲染（识别调研统计 8/17 帧带箭头）。绝不写裸「挑战」，否则会命中「再次挑战 /
+    //   继续挑战 / 挑战深渊连战」等**别的控件**。★本节点【不设 roi】★：
+    //   与四个原节点一致（它们均无 roi；phantom 的定位由状态机的 what+roi 负责）。
+    //   · special_dungeon 的 SpecialChallenge 需 roi [180,1000,400,180]（避开房间页
+    //     灰按钮）且动作为自定义 special_batch_fight，判据/行为不同 → 【保留原节点】。
+    //   · phantom 的两个「挑战」走自定义状态机（phantom_act）→ 不合并。
+    //
+    // ★调用方式★：完全等价的调用者用 "[JumpBack]PubChallenge"，叶子型 next:[]。
+    //   逐文件等价性：四者原 next 均为本文件入口（AutoPush / FarmEntry / RaidEntry /
+    //   SideStoryEntry，side 的两个入口分派表一致），[JumpBack] 等价。
+    //
+    // ★动作：点自己的识别框中心（target: true）★ —— 零偏移，绝不猜按钮。
+    //   post_delay 取 3000（push/farm/side 原值；raid 原 2000 → 3000，稍慢更稳）。
+    // ==========================================================================
+    "PubChallenge": {
+        // 公共「挑战」：编队页点挑战开打。完全等价的调用者用 [JumpBack] 调用，叶子型。
+        // ★判据真源 scene/challenge.py::CHALLENGE_CLICK_PATTERNS（#110）★：整串锚定 +
+        //   至多一个箭头；`挑战` / `挑战→` 两种渲染都认（真机 8/17 帧带箭头）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^挑战(→)?$"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 3000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「新角色加入画面」—— 左下大 NEW 徽标（判据全项目唯一一份）
+    //
+    // 背景：auto_push / gacha / side_story 各写了一份完全相同的「点掉新角色加入画面」
+    //   逻辑（PushNewCharTap / GachaNewCharTap / SideNewCharTap），判据同为
+    //   OCR ^NEW$ + roi [0,800,400,340]。现已收敛到这里。
+    //
+    // ★判据原样照搬、绝不宽匹配★
+    //   · 用大 NEW 徽标（实测 box=[19,1268,378,230] → 720 (13,845,252,153)）当判据；
+    //     右下角「点击」提示 OCR 读不出来，不能当判据。
+    //   · roi [0,800,400,340] 圈定【左下】大徽标，和外传关卡列表页的小 NEW 徽标
+    //     （y≈685）不冲突。
+    //   · 必须 ^NEW$（两端锚定，避免命中列表页被 OCR 读成「NEWT」的徽标）。
+    //
+    // ★调用方式★
+    //   1) 完全等价的调用者用 "[JumpBack]PubNewCharTap"（auto_push / gacha）。
+    //   2) side_story 的 SideNewCharTap 原 next=[SideMarkDonePending, SideStoryEntry]
+    //      含【记账节点 SideMarkDonePending】→ 非等价 → 保留薄包装，只把 recognition
+    //      换成 And(all_of:["PubNewCharText"])（见 side_story.json）。
+    //
+    // ★本节点是【叶子型】★：next 必须为 []，点掉画面后自然不再命中。
+    // ★动作：点自己的识别框中心（target: true）★ —— 该画面点任意处继续，安全。
+    //   post_delay 取 2000（三个原节点一致）。
+    // ==========================================================================
+    // ★#37 修正判据：大 NEW 徽标 vs 列表行小 NEW 徽标（同一「公共事件命中链上步骤页」家族）★
+    //   原 ROI [0,800,400,340] 还把【降临讨伐列表页】的行 NEW 徽标圈了进来：行徽标实测
+    //   box=[14,877,54,25] / [14,1021,52,24]（中心 (41,889) / (40,1033)）全落在此 ROI 内
+    //   → 公共打断事件在链上列表页自匹配 → 点自己的框心（打开【别人】的详情页）→ 链无法
+    //   恢复（SpecialEnterBoss 要目标名 / SpecialScrollList 要「更新列表」，详情页都没有；
+    //   #29 又在链上页面关掉了归位）→ 循环到超时。真机 16448：14/14 全挂（仅在有未通关
+    //   成员=有 NEW 徽标时发作）。外传列表页的小 NEW（y≈685）本就在 ROI 外，故此前没暴露。
+    //   ★为什么不是简单把 ROI 往右挪★：MAA 的 OCR roi 是【先裁剪、再 OCR】（离线实测：
+    //   把 ROI 左边界裁进徽标中间，OCR 就读不出 "NEW" 了 —— 见 #37 的离线探针）。
+    //   大徽标（实测 720 box ≈ (13,845,252,153)，宽 252）裁掉左侧 27px 仍能读全 "NEW"；
+    //   行小徽标（宽 54）裁掉同样 27px 只剩约一半字宽 → 读不出 "NEW"。
+    //   故左边界取 40：大徽标保留约 89% 字宽（真正该弹「新角色」的页面仍命中），
+    //   列表行小徽标只剩约一半（不再命中）。守卫见 tools/contract_hooks/hooks_37.py。
+    "PubNewCharText": {
+        // 新角色加入画面·左下大 NEW 徽标判据：仅作 PubNewCharTap / SideNewCharTap 子识别。
+        // ★#37★ roi 左边界 0→40（宽 400→360）：裁掉列表页行小 NEW 徽标，保住大 NEW 徽标。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^NEW$"], "roi": [40, 800, 360, 340] }
+        }
+    },
+    "PubNewCharTap": {
+        // 公共新角色画面：点掉它继续。完全等价的调用者用 [JumpBack] 调用，叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubNewCharText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「升级 / 等级最大」结算页 —— 点底部「继续」（判据全项目唯一一份）
+    //
+    // 背景：auto_push / side_story / special_dungeon 各写了一份相同的「战后升级结算页」
+    //   逻辑（PushLevelUpContinue / SideLevelUpContinue / SpecialLevelUpContinue），
+    //   判据同为 OCR（等级提升 / 等级最大 / 经验值 任一）。现已收敛判据到这里。
+    //
+    // ★判据原样照搬、绝不宽匹配★：OCR 三选一 ["等级提升","等级最大","经验值"]（子串）。
+    //   该页常常读不到「继续」二字，故不能靠按钮文字；靠页面文案判定「这是升级结算页」。
+    //
+    // ★#46★ 「经验值」这一叶必须排除【战斗失败·放弃确认框】★
+    //   真机（127.0.0.1:16384，维·索拉斯讨伐/超级 打输）：放弃确认框正文是一行
+    //   「道具、RP、经验值、玛纳。」——它含「经验值」，于是这个【全局打断事件】
+    //   （[JumpBack]PubLevelUpContinue，被注入到每个流程节点候选集的【前缀】）在确认框帧上
+    //   先命中并吃掉这一帧，点掉底部固定点 [358,1198]（在确认框之外，等于空点/取消），
+    //   → PubGameOverConfirm（读『OK』推进）**永远轮不到** → 「放弃」点出确认框又被打回
+    //   GAMEOVER → GiveUp/GiveUpFallback 各 max_hit=10 用尽 → 只能空转到 1200s 超时。
+    //   故把「经验值」叶收紧为「后面不是『、玛纳』」：升级结算页的「经验值」仍命中
+    //   （其后是数字/空白/句号），而【放弃确认框的清单项「经验值、玛纳」不再命中】。
+    //   MAA 的 OCR 判据是正则，负向前瞻即可，无需 Not 识别（MAA 也没有 Not）。
+    //   守卫/真机帧复现在 tools/contract_hooks/hooks_46.py + tools/test_gameover_match.py。
+    //
+    // ★动作：点底部固定的「继续」[358,1198]★
+    //   这里【故意】不用 target:true：识别到的是页面文案（等级最大…），不是按钮；
+    //   点识别框会点到屏幕中间的文案。故沿用三个原节点一致的绝对坐标 [358,1198]
+    //   （实测 720 空间底部继续按钮中心）。这是【绝对坐标】，不是「识别框+死偏移」。
+    //
+    // ★调用方式★
+    //   1) 完全等价的调用者用 "[JumpBack]PubLevelUpContinue"（auto_push / side_story）。
+    //   2) special_dungeon 的 SpecialLevelUpContinue 动作为自定义 special_batch_finish，
+    //      且节点名被 agent/side_impl.py 的 _BATCH_BUSY_NODES 引用 → 保留薄包装，
+    //      只把 recognition 换成 And(all_of:["PubLevelUpText"])。
+    //
+    // ★本节点是【叶子型】★：next 必须为 []，点掉后该页消失、自然不再命中。
+    //   post_delay 取 1000（side/special 原值；push 原 1500 → 1000）。
+    // ==========================================================================
+    "PubLevelUpText": {
+        // 升级/等级最大结算页判据：仅作 PubLevelUpContinue / SpecialLevelUpContinue 子识别。
+        // ★#46★ 「经验值」带负向前瞻 (?!、?玛纳)：只避开【放弃确认框】的清单项
+        //   「道具、RP、经验值、玛纳。」（见上方 #46 段），升级页自身的「经验值」不受影响。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["等级提升", "等级最大", "经验值(?!、?玛纳)"] }
+        }
+    },
+    "PubLevelUpContinue": {
+        // 公共升级结算推进：点底部继续 [358,1198]。完全等价调用者用 [JumpBack] 调用，叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubLevelUpText"] }
+        },
+        "action": { "type": "Click", "param": { "target": [358, 1198] } },
+        "post_delay": 1000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // 公共「继续游戏 / 点击开始」—— 登录账号页 / 标题页（判据全项目唯一一份）
+    //
+    // 背景：此前 7 个 pipeline 各写了一份「点继续游戏 / 点点击开始」
+    //   （AutoPush/Gacha/Pull/Side/Special/Phantom 各一对 + Recover 的
+    //    RecoverAccountConfirm/RecoverTitleStart）。判据完全一致，现收敛到这里。
+    //
+    // ★判据原样照搬、精确锚定★
+    //   · 账号页：^继续游戏$（两端锚定）。账号页上还有整句
+    //     「确认后回到标题页，再点「点击开始」进入」，不锚定会点到句中按钮名
+    //     （recover.json 已踩过；auto_push 原为未锚定的「继续游戏」，本次一并精确化）。
+    //   · 标题页：^点击开始$（两端锚定）。同上，账号页那句也含「点击开始」四字，
+    //     不锚定会点错框；auto_push 原为未锚定的「点击开始」，本次一并精确化。
+    //   · 动作：点自己 OCR 框中心（target: true），与各原节点一致（原为 {}，等价）。
+    //   · max_hit 3：与 Gacha/Pull/Side/Special/Phantom/Recover 原值一致（防同一按钮
+    //     无限重复点击）。★AutoPush 原无 max_hit，合并后随多数派获得 max_hit:3★。
+    //   · post_delay：继续游戏 3000 / 点击开始 5000（6 个文件原值；recover 的原值 500
+    //     保留在其薄包装节点里，未改）。
+    //
+    // ★调用方式★（逐文件等价性已确认）
+    //   1) 完全等价的调用者 next 里写 "[JumpBack]PubLoginContinue" /
+    //      "[JumpBack]PubTitleStart"（前缀形式）：auto_push（原 next=["AutoPush"]）、
+    //      gacha（["GachaEntry"]）、pull（["PullEntry"]）、special（["SpecialEntry"]）、
+    //      side（["SideStoryEntry"]；两个入口 SideStoryEntry/SideClearEntry 分派表逐项一致，
+    //      [JumpBack] 回各自入口，等价）。
+    //   2) 非等价调用者【保留薄包装】只收敛判据：
+    //      · recover 的 RecoverAccountConfirm/RecoverTitleStart：原 next 指向
+    //        RecoverWaitLogin/RecoverWaitStart（wait_seconds 链），不是回入口 → 保留薄包装，
+    //        recognition 换成 And(all_of:["PubLoginContinueText"/"PubTitleStartText"])。
+    //      · phantom 的 PhantomLoginContinue/PhantomTitleStart：调用点在 special_dungeon.json
+    //        的 PhantomDispatch.next，原 next=["SpecialEntry"]（要回指挥官 SpecialBatchPlan
+    //        再评估批量目标）。[JumpBack] 只会回到 PhantomDispatch.next，会跳过指挥官 →
+    //        不等价，保留薄包装，只收敛判据。
+    //
+    // ★叶子型★：next 必须为 []，点掉后页面自然往下走、不再命中。
+    // ==========================================================================
+    "PubLoginContinueText": {
+        // 账号确认页【继续游戏】按钮判据：仅作 PubLoginContinue 及各文件薄包装的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^继续游戏$"] }
+        }
+    },
+    "PubLoginContinue": {
+        // 公共账号页推进：点「继续游戏」。完全等价调用者用 [JumpBack] 调用，叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubLoginContinueText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "max_hit": 3,
+        "post_delay": 3000,
+        "next": []
+    },
+    "PubTitleStartText": {
+        // 标题页【点击开始】按钮判据：仅作 PubTitleStart 及各文件薄包装的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^点击开始$"] }
+        }
+    },
+    "PubTitleStart": {
+        // 公共标题页推进：点「点击开始」。完全等价调用者用 [JumpBack] 调用，叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubTitleStartText"] }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "max_hit": 3,
+        "post_delay": 5000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // ★#38 战斗失败 / GAMEOVER（「是否续关？」）★ —— 拒绝续关 + 确认框推进
+    //
+    // 现场（真机扫描 #38）：魁雷精灵兽 战斗打输 → GAMEOVER /「是否续关？」→ 没有对应
+    // 节点 → 任务卡死，后续 3 个成员（威风 / 巫光 / 暗唤精灵兽）一个都没跑成。
+    //
+    // 真机帧（随仓 tools/frames/gameover_prompt.png / gameover_confirm.png；720 空间）：
+    //   · GAMEOVER 页：『GAMEOVER』横幅 [65,463,589,73]、「是否续关?」[300,820,130,33]、
+    //     【放弃】[180,1043,66,39]（中心 213,1062）、【续关】[473,1043,65,36]（中心 506,1061）。
+    //   · 放弃确认框：『放弃时』[313,519,90,35]、「无法获得该关卡内已获得的」[189,557,337,32]、
+    //     【取消】[164,805,66,39]、【OK】[496,805,54,37]（中心 523,824）。
+    //
+    // ★绝不盲点、绝不点【续关】（要花星导石×50，是有限资源）、绝不点【取消】（会退回 GAMEOVER）★：
+    //   · 主节点用 And 同时认「页面锚点 + 按钮自己的 OCR 框」，box_index 指向按钮 → 点其框中心；
+    //   · Fallback 节点只认页面锚点后点**实测坐标**（照本项目 SpecialModeSolo / SpecialBonusNo 的
+    //     「认屏再点实测点」做法），防按钮二字 OCR 抖动时停手 —— 保证「绝不卡死」。
+    //   · 由 special_dungeon.json 的 SpecialEntry.next 以 [JumpBack] 引用（叶子型：next=[]）。
+    // ==========================================================================
+    "PubGameOverTitle": {
+        // 战斗失败页独有『GAMEOVER』大横幅（真机帧 gameover_prompt 720 [65,463,589,73]）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["GAMEOVER"] }
+        }
+    },
+    "PubGameOverPrompt": {
+        // 续关询问「是否续关?」（真机帧 gameover_prompt 720 [300,820,130,33]）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["是否续关"] }
+        }
+    },
+    "PubGameOverGiveUpBtn": {
+        // 【放弃】按钮（真机帧 720 [180,1043,66,39]）；右侧是【续关】——绝不许点它。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^放弃$"] }
+        }
+    },
+    "PubGameOverConfirmText": {
+        // 放弃确认框独有文案（真机帧 gameover_confirm：『放弃时』/「无法获得该关卡内已获得的」）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["放弃时", "无法获得该关卡内已获得的"] }
+        }
+    },
+    "PubGameOverOkBtn": {
+        // 放弃确认框【OK】（真机帧 720 [496,805,54,37]）；左侧是【取消】——绝不点它。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^OK$"] }
+        }
+    },
+    "PubGameOverGiveUp": {
+        // GAMEOVER 页 → **拒绝续关**：And(横幅 + 「是否续关?」+ 【放弃】) box_index=2 →
+        // 点击点 = 【放弃】按钮自己的 OCR 框中心（读屏再点，绝不盲点、绝不点【续关】）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["PubGameOverTitle", "PubGameOverPrompt", "PubGameOverGiveUpBtn"],
+                "box_index": 2
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "max_hit": 10,
+        "post_delay": 1500,
+        "next": []
+    },
+    "PubGameOverGiveUpFallback": {
+        // 兜底：只认『GAMEOVER』+「是否续关?」后点【放弃】实测中心 (213,1062)
+        // （防【放弃】二字 OCR 抖动 → 保证「绝不卡死」）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubGameOverTitle", "PubGameOverPrompt"], "box_index": 0 }
+        },
+        "action": { "type": "Click", "param": { "target": [213, 1062] } },
+        "max_hit": 10,
+        "post_delay": 1500,
+        "next": []
+    },
+    "PubGameOverConfirm": {
+        // 放弃确认框 → 读『OK』框中心推进（And 的 box_index=1 指向 OK 框；绝不点【取消】）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubGameOverConfirmText", "PubGameOverOkBtn"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "max_hit": 10,
+        "post_delay": 1500,
+        "next": []
+    },
+    "PubGameOverConfirmFallback": {
+        // 兜底：只认确认框文案后点【OK】实测中心 (523,823)。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubGameOverConfirmText"], "box_index": 0 }
+        },
+        "action": { "type": "Click", "param": { "target": [523, 823] } },
+        "max_hit": 10,
+        "post_delay": 1500,
+        "next": []
+    },
+
+    // ==========================================================================
+    // ★#72 五重决战：GAMEOVER 屏点【续关】（不是【放弃】）★ —— 续关费的公共节点
+    //
+    // 规格 docs/spec/wuchong-spec.md B3 / D3 / D6：战斗失败进 GAMEOVER（`GAMEOVER` /
+    //   「是否续关?」/ `使用星导石 ×50` / 【放弃】|【续关】）→ **点「续关」**（运维：
+    //   「他现在问我要不要续关，这个逻辑你要 handle 的，需要点是的」）；续关次数由 user 指定。
+    //
+    // ★此屏的 `使用星导石 ×50` = 【续关费】，与 B4「体力不足 → 恢复体力」**不是同一屏**★
+    //   （D6 明确点名）：两套节点必须**互不误命中**。
+    //   · 体力节点（PubStamina*）另要求「请选择要使用的道具 / 体力不足」正文，且星导石行有
+    //     ROI y 900-980；
+    //   · 本屏 `使用星导石×50` 真机在 y≈875（[275,864,171,23]），**在体力 ROI 之上**
+    //     → 两屏判据天然分离（守卫 hooks_72 的 gameover-not-stamina-and-vice-versa 逐帧证明）。
+    //
+    // ★读后动、点识别框中心、零死坐标★：`PubGameOverContinue` = And(横幅 + 「是否续关?」+
+    //   【续关】按钮) box_index=2 → Click target:true —— 点【续关】**自己的 OCR 框中心**
+    //   （真机 720 [473,1043,65,36]），**绝不**用「横幅框 + 死偏移」猜按钮、**绝不**点死坐标。
+    //   ★与 #38 的【放弃】节点不同屏语义★：本节点沿用既有 PubGameOverTitle / PubGameOverPrompt
+    //   叶子（不复制短语），五重的 FLOW_EXCEPTIONS 引用本节点（不再引用 PubGameOverGiveUp）。
+    //   叶子型（next=[]）：点掉后续关若仍失败会再次出现该屏 → 由引擎的续关次数闸兜底。
+    // ==========================================================================
+    "PubGameOverContinueBtn": {
+        // 右侧【续关】按钮判据（真机帧 720 [473,1043,65,36]）。roi 圈定右半（x≥400），
+        // 避开左侧【放弃】[180,1043,66,39]。仅作 PubGameOverContinue 的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^续关$"], "roi": [400, 1000, 320, 110] }
+        }
+    },
+    "PubGameOverContinue": {
+        // GAMEOVER 续关页 → **点【续关】**：And(横幅 + 「是否续关?」+ 【续关】) box_index=2 →
+        // 点击点 = 【续关】按钮自己的 OCR 框中心（读屏再点，零死偏移、绝不点【放弃】）。
+        // 叶子型：next=[]（由 scene.wuchong.continue_refs() 以 [JumpBack] 引用；上限闸
+        // WuchongContinueGuard 排在其前）。复用既有 PubGameOverTitle / PubGameOverPrompt 叶子。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["PubGameOverTitle", "PubGameOverPrompt", "PubGameOverContinueBtn"],
+                "box_index": 2
+            }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2000,
+        "next": []
+    },
+
+    // ==========================================================================
+    // ★#67 领主战页面上的「讨伐完成」奖励弹窗 —— 全项目唯一一份（公共节点）★
+    //
+    // 缺陷（真机 127.0.0.1:16448，#33 part-B 批量跑）
+    // -------------------------------------------------
+    //   领主战清单【开跑前】就停在一张待处理的奖励弹窗上，整屏 OCR 只有：
+    //       讨伐完成 [84,436,552,110]   /   关闭 [326,957,67,39]
+    //   清掉它之后，同一屏 OCR = 【战阵之宴 RAID 页】—— 即这是**战阵之宴的奖励弹窗**，
+    //   它落在了领主战页面（上一件事是刷战阵之宴）上。
+    //   此前 special_dungeon.json 没有任何节点认它 → 领主战清单在第一帧就被它挡住、
+    //   在前一帧无进展地空滚到超时（战阵之宴链 raid.json 只认 ^关闭$，领主战链却没有对应节点）。
+    //
+    // 处置：把「讨伐完成 + 关闭」这条判据收敛成【公共节点】，两处**共用同一份** ——
+    //   · 领主战枢纽：special_dungeon.json::SpecialEntry.next 以 [JumpBack]PubRewardDoneClose
+    //     引用（分派表里引公共节点，不是复制判据）；
+    //   · 战阵之宴链：raid.json::RaidPopupClose 换成引用本公共与门的薄包装（动作/next 原样）。
+    //   于是「同一个事实」只有一份定义（绝不各写一份）。
+    //
+    // ★点击 = 【关闭】按钮自己的识别框中心（box_index=1 指向按钮叶 + Click target:true）★
+    //   绝不用「标题框 + 死偏移」猜按钮位置（本项目的血泪教训：偏移一抖就点到【推荐编成】
+    //   之类的地方）。与门同时认标题 + 按钮：只有弹窗完整在屏才动，不会误点别的页面的「关闭」。
+    //
+    // ★OCR 变体容忍★：标题叶用【子串】「讨伐完成」（不用 ^…$ 锚定）—— 真机标题框很大
+    //   （552×110），OCR 可能在标题后带上标点 / 空白，子串匹配不受影响。
+    //   按钮叶沿用两端锚定 ^关闭$：真机按钮就是干净的「关闭」二字（与 raid 原判据一致）。
+    // ==========================================================================
+    "PubRewardDoneText": {
+        // 「讨伐完成」奖励弹窗·标题判据（子串，容忍标题后附带标点/空白）：仅作子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["讨伐完成"] }
+        }
+    },
+    "PubRewardDoneBtn": {
+        // 「讨伐完成」奖励弹窗·【关闭】按钮判据（真机 [326,957,67,39]）：仅作子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^关闭$"] }
+        }
+    },
+    "PubRewardDoneClose": {
+        // 「讨伐完成」奖励弹窗 → 读后动：And 同时认标题 + 【关闭】，box_index=1 输出【关闭】框，
+        // Click target:true 即点该框中心（零死偏移）。叶子型：点掉后弹窗消失、自然不再命中。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubRewardDoneText", "PubRewardDoneBtn"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 800,
+        "next": []
+    },
+
+    // ==========================================================================
+    // ★「体力不足 → 星岛石恢复」—— 跨场景弹窗（五重 / 战阵之宴 / 领主战族 / 深渊共用一份）★
+    //
+    // 运维裁决（settled）：「需要补的，因为五重会消耗体力」；「★只用星岛石恢复★」。
+    //   五重决战 / 战阵之宴 / 领主战族 / 深渊连战在开打时都消耗体力；体力不足时游戏弹
+    //   「回复体力」弹窗（标题「回复体力/体力不足」、副标题「请选择要使用的道具」，选项
+    //   体力回复药（小/中/大）与 ★星导石 × 50（回复 100 体力）★，底部红条「取消」）。
+    //   此前 pipeline 没有任何节点认它 → 流程停在弹窗上空等，直到各场景的有界收工把它停掉。
+    //
+    // ★策略（唯一声明处 = scene/stamina.py）★：**只用星岛石恢复** —— 识别到弹窗即点
+    //   「星导石 × 50」那一行 → 二次确认框点 OK → 结果窗「体力回复了！」点 OK（★三步★；
+    //   第三步：真机 384 第四跑实测确认 OK 后会弹「体力回复了！」结果窗、此前无节点认它 →
+    //   五重空转到「未知画面 121 次」兜底；现作为恢复链第一类参与的第三态处理）。
+    //
+    // ★数据 / 接线★：短语与节点名唯一真源是 scene/stamina.py；各链（wuchong / raid /
+    //   special_dungeon / abyss）只以 [JumpBack]PubStamina* 引用。一致性由
+    //   tools/contract_hooks/hooks_stamina.py 把守（配置 ↔ 接线不同步即红）。
+    //
+    // ★读后动、零死偏移★：动作节点一律 And(弹窗, 目标) + box_index=1 → Click target:true，
+    //   点的是那一行 / 那个按钮**识别框中心**（旧线用死坐标，本项目禁止）。
+    //   ★绝不点【取消】★（只会退回上一页、下一轮再弹）；★容忍 星导石/星岛石 两种写法★。
+    //
+    // ★排在看门狗之前★：静止的弹窗帧不得被卡死看门狗当成「卡死」而重开游戏。
+    //
+    // ★诚实边界★：判据取自旧线真机帧 + 本线真机 384 帧；本线**未主动制造**「体力不足」状态
+    //   （账号体力接近上限），但第四跑真机 384 已**自然到达**该流程并覆盖到第三态结果窗 →
+    //   仍以离线验证为主（判据 / 接线 / 策略 + prove-red + 真机帧回放）。
+    //   ★历史更正★：旧注释「本票未处理第三态结果窗（五重点 OK 后关卡直接开打）」被真机 384
+    //   第四跑证伪 —— 该结果窗确实出现、且此前无节点认它（见 PubStaminaDone* 定义）。
+    // ==========================================================================
+    "PubStaminaInsufficientText": {
+        // 回复体力弹窗·正文叶（真机帧副标题「请选择要使用的道具」；并容忍「体力不足」标题变体）。
+        // 仅作 PubStaminaUseStone 的子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["请选择要使用的道具", "体力不足"] }
+        }
+    },
+    "PubStaminaStoneText": {
+        // 「星导石 × 50」那一行的行名叶（★容忍 OCR 变体：星导石 / 星岛石★）。
+        // roi 圈定弹窗选项区那一行，避开二次确认框标题与别的页面同名文字。★必须与
+        // scene/stamina.py 的 STONE_ROW_ROI 相等★（hooks_stamina / hooks_74_stamina 钉住）。
+        // ★真机 384 重标（2026-10-16，第三次 run）★：旧值 [180,900,420,80] 取自旧线帧
+        // （行在 y≈934）；本线真机弹窗「星导石×50」实测 box=[209,873,160,32]（行跨 y
+        // 873..905）→ 跨在旧 ROI 上边界外、被裁剪后永不命中 → 体力永不恢复、五重空转
+        // 121 次后兜底收工（见 tools/frames/stamina_insufficient_wuchong384.png）。
+        // 故意放宽 y 840..1000（而非只挪 ~30px），容忍布局 / 内边距漂移；x 维持 180..600
+        // （数量文字 x≈518..645 仍被排除）。仅作子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["星导石", "星岛石"], "roi": [180, 840, 420, 160] }
+        }
+    },
+    // ★#102 P0-1★ 「星导石行」的**模板通道**（模板优先 / OCR 兜底）—— 真源 scene/templates.py
+    //
+    // 为什么加（D3 的复查）：行名 OCR 要**同时**容忍 星导石 / 星岛石 两种写法，这本身就是
+    //   「我们知道它会读错」的自白（调研 §2.1 D3）；而 `^星导石$` 的失败形态是**静默**的
+    //   （#74 真机：ROI 差 30px → 行被裁掉 → 永不命中 → 五重空转 121 次后兜底收工）。
+    //   模板读的是**图形**，与字形/写法无关。
+    //
+    // 判据 = 那一行的**物品图标**（彩虹球，720 (82,877,103,88)），不是文字、也不是 ×50 数量：
+    //   数量是「持有 2753425」会变（调研 N1：内容会跳变的不许进模板），带进去明天就失效。
+    //
+    // ★数字（真机帧实测，全滑窗 TM_CCOEFF_NORMED；存档在 scene/templates.py）★
+    //   正例 stamina_insufficient_wuchong384.png：**1.0000 @(82,877)**（灰/彩同分，自证）；
+    //   负例 6 帧 ROI 内最高 **0.2779**（灰 0.2716 / 彩 0.2779）→ 阈值 0.85 余量 **0.5721**；
+    //   ★ROI 外的危险高分★：同一个彩虹球在 ark62_detail_unpairable.png 的【首次报酬】上
+    //   灰 **0.7734 @(530,439)**、lord_team_page.png 上 **0.7805 @(568,269)** ——
+    //   **全屏 ROI 会直接假阳**，所以 roi 是承重防线，不是顺手写的。
+    "PubStaminaStoneIcon": {
+        // 星导石行·物品图标叶（TemplateMatch）。★roi 只框图标那一栏★：x 66..200
+        // （行名起 x≈209、数量起 x≈518 都被排除），y 852..988 留 ±23px 余量（#74 的 30px 教训）。
+        // ★order_by: Score 显式★：要「最像」，绝不吃默认 Horizontal（取最左）。
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": ["common/stamina_stone_icon.png"],
+                "threshold": 0.85,
+                "roi": [66, 852, 134, 136],
+                "order_by": "Score"
+            }
+        }
+    },
+    "PubStaminaStoneRow": {
+        // ★双通道叶★：模板优先、OCR 兜底。Or 的语义是「命中第一个即成功，后续不再识别」
+        //（协议 .research/3.1-pipeline.md:858-860）⇒ 顺序即优先级。
+        // ★OCR 兜底一字不改★：PubStaminaStoneText 仍是 OCR + ["星导石","星岛石"] + 原 roi
+        //（hooks_stamina / hooks_74_stamina 钉住它；本票**没有**删 OCR）。
+        // ★输出框★：谁命中就用谁的框 —— 模板命中 ⇒ 图标框（中心 (138,916)，在同一行卡片内）；
+        //   OCR 命中 ⇒ 行名框（中心 (289,889)，与改动前**完全相同**）。两种落点都在行内、都可点行。
+        "recognition": {
+            "type": "Or",
+            "param": { "any_of": ["PubStaminaStoneIcon", "PubStaminaStoneText"] }
+        }
+    },
+    "PubStaminaUseStoneTpl": {
+        // ★第一步（模板通道）★：And(弹窗正文 + 双通道行) box_index=1 → 点该行框中心（零死偏移）。
+        // 叶子型（next=[]）：点掉后弹二次确认框，自然不再命中。
+        // ★为什么是一个**新节点**而不是直接改 PubStaminaUseStone★：后者被
+        //   hooks_stamina（node_failures: all_of 逐项 == [正文, 星导石行]）与
+        //   tools/verify_stamina_frames.py（输出框 == 真机行框 [209,873,160,32]）双向钉死，
+        //   box 语义一变两条守卫都红。⇒ 新节点 + 在 next 候选里排在 OCR 版**之前**，
+        //   得到「模板优先、OCR 兜底」而**不动**已被钉住的语义。
+        // ★接线现状（2026-10-18 更新）★：已接进**全部 7 个消费链枢纽** —— side_story.json 的
+        //   SideStoryEntry / SideClearEntry、abyss.json::AbyssEntry、auto_push.json::AutoPush、
+        //   raid.json::RaidDispatch、special_dungeon.json::SpecialEntry、wuchong.json::WuchongEntry
+        //   + wuchong_scene.json::WuchongGuardChain（#102）。一律 [JumpBack] 排在 OCR 版**之前**。
+        //   枢纽清单的真源 = scene.stamina.STAMINA_CONSUMING_CHAINS（hooks_102 逐枢纽对账）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubStaminaInsufficientText", "PubStaminaStoneRow"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 1500,
+        "next": []
+    },
+    "PubStaminaUseStone": {
+        // ★第一步★：And(弹窗正文 + 「星导石」行) box_index=1 → 点【星导石行】框中心
+        // （零死偏移）。叶子型：点掉后弹二次确认框（不消失则由下一节点接）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubStaminaInsufficientText", "PubStaminaStoneText"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 1500,
+        "next": []
+    },
+    "PubStaminaConfirmText": {
+        // 二次确认框标题叶（旧线实测「点星导石 × 50 → 弹『是否消耗星导石回复体力?』→ 点 OK
+        // 才生效」；★同样容忍 星岛石★）。仅作子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["是否消耗星(导|岛)石回复体力"] }
+        }
+    },
+    "PubStaminaOkText": {
+        // 二次确认框【OK】按钮叶（两端锚定 ^OK$；roi 圈定右侧按钮，避开左侧【取消】）。仅作子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^OK$"], "roi": [430, 770, 290, 90] }
+        }
+    },
+    "PubStaminaConfirmOk": {
+        // ★第二步★：And(确认框标题 + OK) box_index=1 → 点【OK】框中心（左【取消】绝不点）。
+        // 这一步才真扣星导石、体力 +100，随后关卡开打。叶子型。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubStaminaConfirmText", "PubStaminaOkText"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 2500,
+        "next": []
+    },
+    "PubStaminaDoneText": {
+        // 结果窗·正文叶（★第三步★）：真机 384 第四跑（2026-10-16）实测 —— 二次确认 OK 之后
+        // 游戏**确实**弹出「体力回复了！」结果窗（带 OK 按钮）；此前无节点认它 → 五重空转
+        // WuchongEntry/WuchongWait 数分钟、state 恒 unknown，最终「未知画面累计 121 次」收工。
+        // 证据帧 tools/frames/stamina_recovered_done_wuchong384.png（OCR [267,424,168,36]）。
+        // 子串（容忍尾部标点）；★只在本屏出现，与「体力回复药」不混（药无『了』）★。仅作子识别。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["体力回复了"] }
+        }
+    },
+    "PubStaminaDoneOkText": {
+        // 结果窗·【OK】按钮叶（真机 384 OCR [333,805,53,37]——在**中心左侧**）。两端锚定 ^OK$。
+        // ★自有 ROI（x 290..450）★：完整包含结果窗 OK，且**排除确认框 OK（x≈496）** ——
+        // 两屏 OK 的 x 区间不重叠，各用各的 ROI（hooks_stamina_done 钉互不误命中）。
+        // ★必须与 scene/stamina.py 的 DONE_OK_ROI 相等★（hooks_stamina / hooks_stamina_done 钉住）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^OK$"], "roi": [290, 770, 160, 90] }
+        }
+    },
+    "PubStaminaDoneOk": {
+        // ★第三步★：And(结果窗正文 + OK) box_index=1 → 点【OK】框中心（零死偏移、读后动）。
+        // 叶子型：点掉后结果窗消失、自然不再命中（幂等）。排在「恢复链」确认步之后。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubStaminaDoneText", "PubStaminaDoneOkText"], "box_index": 1 }
+        },
+        "action": { "type": "Click", "param": { "target": true } },
+        "post_delay": 1500,
+        "next": []
+    }
+}

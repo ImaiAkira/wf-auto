@@ -1,0 +1,93 @@
+name: check
+
+on:
+  push:
+    branches:
+      - "**"
+    # 为什么要加 tags：下面的「version ↔ tag 对账」只在真实发布 tag
+    # （refs/tags/v*）上跑，而 GitHub 的 push 过滤器里只写 branches 时不会在
+    # tag push 上触发。tag push 不参与 paths 过滤（GitHub 不对 tag push 求值
+    # paths），所以这里的 paths 只影响分支构建。
+    tags:
+      - "v*"
+    paths:
+      - ".github/workflows/check.yml"
+      - "assets/**"
+      - "**.py"
+  pull_request:
+    branches:
+      - "**"
+    paths:
+      - ".github/workflows/check.yml"
+      - "assets/**"
+      - "**.py"
+  workflow_dispatch:
+
+jobs:
+  resource:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 下面两个 Python 守卫要 json-with-comments（tools/requirements.txt）与
+      # 一个不踩 PEP 668 的 pip，所以用 setup-python 而不是系统 python。
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tools/requirements.txt
+
+      # 脱敏守卫（#132 产出，依赖 tools/publish_public.py 的发布白名单）：
+      # 扫「将要发布的东西」里有没有 A/B/C/F 四类可识别信息。红 = 有命中；
+      # 命中摘录本身是脱敏过的（CI 日志在公开仓是公开的）。
+      - name: Guard against leaked PII
+        run: python tools/verify_no_pii.py
+
+      - name: Use Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # maa-checker 是模板自带的资源 lint。它现在报的是**既有数据债**，不是
+      # 本轮改动引入的 —— 见 #139：
+      #   · 「重复路由」—— 生成的 pipeline 里同一个后继在候选表里出现多次
+      #     （lords.json ×10 / wuchong.json ×7 / special_dungeon.json ×3 /
+      #      wuchong_scene.json ×1）。运行时无害（框架本来就按顺序试），
+      #     但属于生成器没去重。
+      #   · 「未知选项 打哪个迷宫元素」—— 选项定义了却没挂到任何任务上。
+      # 这些要改在**生成器**（scene/wuchong.py 等）里，不能在生成物上手改。
+      # 所以这一步是**adviesory**：失败只标黄，不挡发布；真正的闸门是下面的
+      # schema 校验 + 脱敏守卫 + tag 上的版本对账。
+      - name: Run maa-checker (advisory — known data debt, see #138)
+        continue-on-error: true
+        run: |
+          npm ci
+          npx @nekosu/maa-tools check
+
+      - name: Install maafw
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade maafw --pre
+
+      - name: Validate JSON Schema
+        run: |
+          python -m pip install jsonschema==4.26.0 referencing==0.37.0
+          python tools/validate_schema.py --schema-dir deps/tools --resource-dirs assets/resource --exclude-dirs assets/resource/announcement --interface-files assets/interface.json
+
+      # 版本 ↔ tag 对账（#133 产出）。只在真实发布 tag 上跑：分支构建的 meta 会
+      # 合成 v0.0.0-<date>-<sha>-ci.<n> 这类 tag，永远对不上真实发布版本。
+      #
+      # 语义提醒：发布闸门是 install.yml 里的 fill_interface 覆盖（把 tag 写进
+      # install/interface.json），不是这一步。这一步比对的是**仓库里提交的**
+      # assets/interface.json，所以它绿的前提是「release commit 上的 version
+      # 已经等于该 tag」。若发布流程坚持「version 只是占位、由 CI 覆盖」，这一步
+      # 在 tag 上会是红的 —— 这是有意暴露的发布纪律问题，不要用 continue-on-error 盖掉。
+      - name: Check version matches release tag
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: python tools/check_version.py --tag "$GITHUB_REF_NAME"
