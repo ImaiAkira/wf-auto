@@ -1,0 +1,969 @@
+{
+  "_generated": {
+    "by": "tools/gen_lord_registry.py --write",
+    "source": "scene/lords.py",
+    "note": "投影，不是第二真源：内容 = scene/lords.py 的 LORDS。hooks_106 断言本文件与重新渲染的结果逐字相等，手改任何一边都会红。MAA 只加载 assets/resource/**，本文件在资源包之外（不进 pipeline、不进安装产物）。",
+    "ocr_date": "2026-10-17",
+    "schema_version": 1
+  },
+  "difficulty_vocabulary": [
+    "初级",
+    "中级",
+    "高级",
+    "高级+",
+    "超级",
+    "地狱级"
+  ],
+  "lords": [
+    {
+      "slug": "lord/猩红巨熊讨伐",
+      "kind": "lord",
+      "row_name": "猩红巨熊讨伐",
+      "row_regex": "^猩红巨熊讨伐$",
+      "row_prefix": null,
+      "max_tiers": 4,
+      "max_tiers_source": "list_page_n_of_m",
+      "max_tiers_verified": true,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR",
+        "缺详情页认证文本前缀（详情页行名 = 前缀 + 难度名）",
+        "⚠ 单帧单账号：M 由列表页 `通关数 N/M` 的分母读得 —— 需第二账号复算（调研 §6 #1）"
+      ],
+      "evidence": [
+        "tools/frames/lord_page_tab_lord.png|2026-10-17 OCR: 行「猩红巨熊讨伐」y=1174 + `通关数3/4` y=1248 score=0.958"
+      ]
+    },
+    {
+      "slug": "lord/背鳍三兄弟讨伐",
+      "kind": "lord",
+      "row_name": "背鳍三兄弟讨伐",
+      "row_regex": "^背鳍三兄弟讨伐$",
+      "row_prefix": null,
+      "max_tiers": 4,
+      "max_tiers_source": "list_page_n_of_m",
+      "max_tiers_verified": true,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR",
+        "缺详情页认证文本前缀（详情页行名 = 前缀 + 难度名）",
+        "⚠ 单帧单账号：M 由列表页 `通关数 N/M` 的分母读得 —— 需第二账号复算（调研 §6 #1）"
+      ],
+      "evidence": [
+        "tools/frames/lord_page_tab_lord.png|2026-10-17 OCR: 行「背鳍三兄弟讨伐」y=1392 + `通关数1/4` y=1464 score=0.973"
+      ]
+    },
+    {
+      "slug": "lord/八岐大蛇讨伐",
+      "kind": "lord",
+      "row_name": "八岐大蛇讨伐",
+      "row_regex": "^八岐大蛇讨伐$",
+      "row_prefix": null,
+      "max_tiers": 4,
+      "max_tiers_source": "list_page_n_of_m",
+      "max_tiers_verified": true,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR",
+        "缺详情页认证文本前缀（详情页行名 = 前缀 + 难度名）",
+        "⚠ 单帧单账号：M 由列表页 `通关数 N/M` 的分母读得 —— 需第二账号复算（调研 §6 #1）"
+      ],
+      "evidence": [
+        "tools/frames/lord_page_tab_lord.png|2026-10-17 OCR: 行「八岐大蛇讨伐」y=1608 + `通关数4/4` y=1680 score=0.959，同行 COMPLETE!! 徽标"
+      ]
+    },
+    {
+      "slug": "lord/艾基尔·嫉妒讨伐",
+      "kind": "lord",
+      "row_name": "艾基尔·嫉妒讨伐",
+      "row_regex": "^艾基尔·嫉妒讨伐$",
+      "row_prefix": null,
+      "max_tiers": 4,
+      "max_tiers_source": "list_page_n_of_m",
+      "max_tiers_verified": true,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR",
+        "缺详情页认证文本前缀（详情页行名 = 前缀 + 难度名）",
+        "⚠ 单帧单账号：M 由列表页 `通关数 N/M` 的分母读得 —— 需第二账号复算（调研 §6 #1）"
+      ],
+      "evidence": [
+        "tools/frames/lord_page_tab_lord.png|2026-10-17 OCR: 行「艾基尔·嫉妒讨伐」y=960 + `通关数1/4` y=1032 score=0.972"
+      ]
+    },
+    {
+      "slug": "lord/妖狐讨伐",
+      "kind": "lord",
+      "row_name": "妖狐讨伐",
+      "row_regex": "^妖狐讨伐$",
+      "row_prefix": "妖狐",
+      "max_tiers": 4,
+      "max_tiers_source": "detail_page_rows",
+      "max_tiers_verified": true,
+      "unlock_chain": [
+        "中级",
+        "高级",
+        "高级+",
+        "超级"
+      ],
+      "unlock_edges": [
+        [
+          "中级",
+          "高级"
+        ],
+        [
+          "高级",
+          "高级+"
+        ],
+        [
+          "高级+",
+          "超级"
+        ]
+      ],
+      "row_labels": {
+        "中级": "妖狐中级",
+        "高级": "妖狐高级",
+        "高级+": "妖狐高级+",
+        "超级": "妖狐超级"
+      },
+      "verified": true,
+      "needs": [
+        "⚠ 单帧单账号：M 由详情页「可见档全 COMPLETE!!」推得；若某档（如 地狱级）是活动期开关，M 可能被低估 —— 需第二账号 / 活动期对照复算（调研 §6 #1/#6）",
+        "⚠ 地狱级是否属于该成员未实测（真机 46 成员里 11 个有；出现条件未证实，调研 §1.3 / §6 #6）"
+      ],
+      "evidence": [
+        "tools/frames/lord_detail_multidiff.png|2026-10-17 OCR: 4 行 妖狐中级 / 妖狐高级 / 妖狐高级+ / 妖狐超级（纵向 y=456/648/837/1028，自上而下 = 难度降序）；全 COMPLETE!!（该账号已清空可见档）；分类「领主战」；标题 OCR「妖狐」"
+      ]
+    },
+    {
+      "slug": "lord/诅咒弧魔艾基尔讨伐",
+      "kind": "lord",
+      "row_name": "诅咒弧魔艾基尔讨伐",
+      "row_regex": "^诅咒弧魔艾基尔讨伐$",
+      "row_prefix": "诅咒弧魔艾基尔",
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {
+        "中级": "诅咒弧魔艾基尔中级"
+      },
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": [
+        "tools/frames/lord_detail_singlediff.png|2026-10-17 OCR: 1 行 诅咒弧魔艾基尔中级（纵向 y=458，自上而下 = 难度降序）；含未通关行（NEW / 首次报酬 在场）；分类「领主战」；标题 OCR「诅咒弧魔艾基尔」"
+      ]
+    },
+    {
+      "slug": "joss/无猾机兵",
+      "kind": "joss",
+      "row_name": "无猾机兵",
+      "row_regex": "^无猾机兵$",
+      "row_prefix": "机工神兵菲诺梅那",
+      "max_tiers": 5,
+      "max_tiers_source": "list_page_n_of_m",
+      "max_tiers_verified": true,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {
+        "中级": "机工神兵菲诺梅那中级"
+      },
+      "verified": false,
+      "needs": [
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR",
+        "⚠ 单帧单账号：M 由列表页 `通关数 N/M` 的分母读得 —— 需第二账号复算（调研 §6 #1）"
+      ],
+      "evidence": [
+        "tools/frames/lord_page_tab_joss.png|2026-10-17 OCR: 行「无猾机兵」y=1172 + `通关数5/5` y=1248 score=0.944，同行 COMPLETE!! 徽标",
+        "tools/frames/lord_detail_naught_robot_c1.jpg|2026-10-17 OCR: 1 行 机工神兵菲诺梅那中级（纵向 y=458，自上而下 = 难度降序）；含未通关行（NEW / 首次报酬 在场）；分类「降临讨伐」；标题 OCR「无猾机兵」"
+      ]
+    },
+    {
+      "slug": "joss/红嫉机兵",
+      "kind": "joss",
+      "row_name": "红嫉机兵",
+      "row_regex": "^红嫉族?机兵$",
+      "row_prefix": "红机兵海茵莱特",
+      "max_tiers": 4,
+      "max_tiers_source": "list_page_n_of_m",
+      "max_tiers_verified": true,
+      "unlock_chain": [
+        "中级",
+        "高级",
+        "高级+",
+        "超级"
+      ],
+      "unlock_edges": [
+        [
+          "中级",
+          "高级"
+        ],
+        [
+          "高级",
+          "高级+"
+        ],
+        [
+          "高级+",
+          "超级"
+        ]
+      ],
+      "row_labels": {
+        "中级": "红机兵海茵莱特中级",
+        "高级": "红机兵海茵莱特高级",
+        "高级+": "红机兵海茵莱特高级+",
+        "超级": "红机兵海茵莱特超级"
+      },
+      "verified": true,
+      "needs": [
+        "⚠ 单帧单账号：M 由列表页 `通关数 N/M` 的分母读得 —— 需第二账号复算（调研 §6 #1）",
+        "⚠ 地狱级是否属于该成员未实测（真机 46 成员里 11 个有；出现条件未证实，调研 §1.3 / §6 #6）"
+      ],
+      "evidence": [
+        "tools/frames/lord_page_tab_joss.png|2026-10-17 OCR: 行「红嫉机兵」y=1388 + `通关数4/4` y=1464 score=0.959，同行 COMPLETE!! 徽标",
+        "tools/frames/lord_detail_redjoss_cleared.png|2026-10-17 OCR: 4 行 红机兵海茵莱特中级 / 红机兵海茵莱特高级 / 红机兵海茵莱特高级+ / 红机兵海茵莱特超级（纵向 y=458/649/840/1030，自上而下 = 难度降序）；全 COMPLETE!!（该账号已清空可见档）；分类「降临讨伐」；标题 OCR「红嫉机兵」",
+        "tools/frames/lord_detail_redjoss_early.png|2026-10-17 OCR: 1 行 红机兵海茵莱特中级（纵向 y=458，自上而下 = 难度降序）；含未通关行（NEW / 首次报酬 在场）；分类「降临讨伐」；标题 OCR「红嫉族机兵」"
+      ]
+    },
+    {
+      "slug": "joss/苍叹机兵",
+      "kind": "joss",
+      "row_name": "苍叹机兵",
+      "row_regex": "^苍叹机兵$",
+      "row_prefix": null,
+      "max_tiers": 4,
+      "max_tiers_source": "list_page_n_of_m",
+      "max_tiers_verified": true,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR",
+        "缺详情页认证文本前缀（详情页行名 = 前缀 + 难度名）",
+        "⚠ 单帧单账号：M 由列表页 `通关数 N/M` 的分母读得 —— 需第二账号复算（调研 §6 #1）"
+      ],
+      "evidence": [
+        "tools/frames/lord_page_tab_joss.png|2026-10-17 OCR: 行「苍叹机兵」y=1604 + `通关数4/4` y=1680 score=0.959，同行 COMPLETE!! 徽标"
+      ]
+    },
+    {
+      "slug": "lord/管理者讨伐",
+      "kind": "lord",
+      "row_name": "管理者讨伐",
+      "row_regex": "^管理者讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/Sec-5200Li讨伐",
+      "kind": "lord",
+      "row_name": "Sec-5200Li讨伐",
+      "row_regex": "^Sec-5200Li讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/白虎讨伐",
+      "kind": "lord",
+      "row_name": "白虎讨伐",
+      "row_regex": "^白虎讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/风将獠牙骑士讨伐",
+      "kind": "lord",
+      "row_name": "风将獠牙骑士讨伐",
+      "row_regex": "^风将獠牙骑士讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/寄居蟹船长讨伐",
+      "kind": "lord",
+      "row_name": "寄居蟹船长讨伐",
+      "row_regex": "^寄居蟹船长讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/潮汐巨妖讨伐",
+      "kind": "lord",
+      "row_name": "潮汐巨妖讨伐",
+      "row_regex": "^潮汐巨妖讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/废墟魔像讨伐",
+      "kind": "lord",
+      "row_name": "废墟魔像讨伐",
+      "row_regex": "^废墟魔像讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/废墟守卫·火讨伐",
+      "kind": "lord",
+      "row_name": "废墟守卫·火讨伐",
+      "row_regex": "^废墟守卫·火讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/雷霆树妖讨伐",
+      "kind": "lord",
+      "row_name": "雷霆树妖讨伐",
+      "row_regex": "^雷霆树妖讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/维·索拉斯讨伐",
+      "kind": "lord",
+      "row_name": "维·索拉斯讨伐",
+      "row_regex": "^维·索拉斯讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "lord/不死王瑞西塔尔讨伐",
+      "kind": "lord",
+      "row_name": "不死王瑞西塔尔讨伐",
+      "row_regex": "^不死王瑞西塔尔讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/橙悚机兵",
+      "kind": "joss",
+      "row_name": "橙悚机兵",
+      "row_regex": "^橙悚机兵$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/闪哭机兵",
+      "kind": "joss",
+      "row_name": "闪哭机兵",
+      "row_regex": "^闪哭机兵$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/暗凛机兵",
+      "kind": "joss",
+      "row_name": "暗凛机兵",
+      "row_regex": "^暗凛机兵$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/始龙之眼",
+      "kind": "joss",
+      "row_name": "始龙之眼",
+      "row_regex": "^始龙之眼$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/为你奏响的镇魂歌",
+      "kind": "joss",
+      "row_name": "为你奏响的镇魂歌",
+      "row_regex": "^为你奏响的镇魂歌$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/圣夜的淘气鬼",
+      "kind": "joss",
+      "row_name": "圣夜的淘气鬼",
+      "row_regex": "^圣夜的淘气鬼$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/怨炎精灵兽",
+      "kind": "joss",
+      "row_name": "怨炎精灵兽",
+      "row_regex": "^怨炎精灵兽$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/水狂精灵兽",
+      "kind": "joss",
+      "row_name": "水狂精灵兽",
+      "row_regex": "^水狂精灵兽$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/魁雷精灵兽",
+      "kind": "joss",
+      "row_name": "魁雷精灵兽",
+      "row_regex": "^魁雷精灵兽$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/威风精灵兽",
+      "kind": "joss",
+      "row_name": "威风精灵兽",
+      "row_regex": "^威风精灵兽$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/巫光精灵兽",
+      "kind": "joss",
+      "row_name": "巫光精灵兽",
+      "row_regex": "^巫光精灵兽$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/暗唤精灵兽",
+      "kind": "joss",
+      "row_name": "暗唤精灵兽",
+      "row_regex": "^暗唤精灵兽$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/方舟守护者讨伐",
+      "kind": "joss",
+      "row_name": "方舟守护者讨伐",
+      "row_regex": "^方舟守护者讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/赤之女王讨伐",
+      "kind": "joss",
+      "row_name": "赤之女王讨伐",
+      "row_regex": "^赤之女王讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/青之女王讨伐",
+      "kind": "joss",
+      "row_name": "青之女王讨伐",
+      "row_regex": "^青之女王讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/碧之女王讨伐",
+      "kind": "joss",
+      "row_name": "碧之女王讨伐",
+      "row_regex": "^碧之女王讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/皓之女王讨伐",
+      "kind": "joss",
+      "row_name": "皓之女王讨伐",
+      "row_regex": "^皓之女王讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/墨之女王讨伐",
+      "kind": "joss",
+      "row_name": "墨之女王讨伐",
+      "row_regex": "^墨之女王讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/伊尔昂斯拉讨伐",
+      "kind": "joss",
+      "row_name": "伊尔昂斯拉讨伐",
+      "row_regex": "^伊尔昂斯拉讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/伊尔梅塔雷讨伐",
+      "kind": "joss",
+      "row_name": "伊尔梅塔雷讨伐",
+      "row_regex": "^伊尔梅塔雷讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/碧愁机兵",
+      "kind": "joss",
+      "row_name": "碧愁机兵",
+      "row_regex": "^碧愁机兵$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/金之女王讨伐",
+      "kind": "joss",
+      "row_name": "金之女王讨伐",
+      "row_regex": "^金之女王讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/伊尔格拉乌讨伐",
+      "kind": "joss",
+      "row_name": "伊尔格拉乌讨伐",
+      "row_regex": "^伊尔格拉乌讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/伊劳德雷斯讨伐",
+      "kind": "joss",
+      "row_name": "伊劳德雷斯讨伐",
+      "row_regex": "^伊劳德雷斯讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/伊萨巴迪卡讨伐",
+      "kind": "joss",
+      "row_name": "伊萨巴迪卡讨伐",
+      "row_regex": "^伊萨巴迪卡讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    },
+    {
+      "slug": "joss/伊尔考普斯讨伐",
+      "kind": "joss",
+      "row_name": "伊尔考普斯讨伐",
+      "row_regex": "^伊尔考普斯讨伐$",
+      "row_prefix": null,
+      "max_tiers": null,
+      "max_tiers_source": "unknown",
+      "max_tiers_verified": false,
+      "unlock_chain": [],
+      "unlock_edges": [],
+      "row_labels": {},
+      "verified": false,
+      "needs": [
+        "缺 M（总档数）：需要列表页该行的 `通关数 N/M` 帧 OCR（分母 = M）",
+        "缺解锁链 / 认证文本：需要该成员详情页整屏的逐档行名帧 OCR"
+      ],
+      "evidence": []
+    }
+  ]
+}

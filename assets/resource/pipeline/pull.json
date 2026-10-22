@@ -1,0 +1,117 @@
+{
+    // 活动扭蛋箱（GACHA-BOX）自动抽取 —— 无限池
+    // 入口：PullEntry
+    // 使用前请先手动打开「活动扭蛋箱」页面（本任务不做任何导航）。
+    //
+    // ================= 实测完整流程（16384，1080x1920 原始坐标）=================
+    //  1) 点「抽取」[788,880,109,62]
+    //     -> 会【一次把整个箱子抽完】（实测 2734/2734次 直接变 0/0次，剩余×2 变 剩余×0）
+    //     -> 随后是很长的逐个揭示动画（实测 >40 秒），期间满屏 ×1000 / ×5 / ×50 等奖励文字
+    //  2) 箱子抽空后点「库存重置」[857,428,123,42]
+    //     注意：箱子【没抽完时点它会弹「无法重置」】(尚未获得扭蛋箱中全部报酬)
+    //  3) 弹确认框：
+    //         是否重置扭蛋箱 并补充已抽取的道具？
+    //         取消 [246,1208,95,54]        OK [744,1208,79,56]   <- 第一个 OK
+    //  4) 点第一个 OK -> 再弹一个：
+    //         已重置。                     OK [500,1208,79,56]   <- 第二个 OK（x 位置不同！）
+    //  5) 点第二个 OK -> 箱子补满 (2734/2734次)，回到步骤 1
+    //
+    // ================= 关键设计（都是踩过的坑）=================
+    //  * 两个 OK 弹窗【位置不同】，所以必须用「识别到 ^OK$ 的框」当点击目标，
+    //    绝不能写死坐标。只认 ^OK$ 就能一次覆盖两个弹窗。
+    //    （曾经写成 And(重置扭蛋箱, OK)：第二个弹窗没有「重置扭蛋箱」文字，
+    //      结果完全不会触发、卡死在「已重置。」上。）
+    //  * 「库存重置」不可点时点了会弹「无法重置」——用 PullCantReset 把它点掉再重试。
+    //    揭晓动画结束后重试自然会成功，这就是"等动画结束"的实现方式
+    //    （实测动画期间 OCR 仍读得到界面文字，无法用识别判断动画是否结束）。
+    //  * 全部节点【不设 max_hit】——它是累计的，用满后该节点会被静默跳过，表现为"某处突然不点了"。
+    // ===========================================================
+    "PullEntry": {
+        "next": [
+            // 公共换日弹窗（common.json）：最临时的全局打断，放最前。
+            // 只在 ^日期变了$ + ^OK$ 同时命中时才动，不会抢走扭蛋箱重置弹窗的 OK。
+            "[JumpBack]PubDailyPopup",
+            // 公共账号页/标题页推进（common.json）：原地替换原 PullLoginContinue/PullTitleStart。
+            // ★等价性★：二者原 next=["PullEntry"]（调用者即 PullEntry）→ [JumpBack] 等价。
+            "[JumpBack]PubLoginContinue",
+            "[JumpBack]PubTitleStart",
+            // 公共加载等待（common.json）：纯等待不点击；沿用原 PullLoadingWait 的位置。
+            "[JumpBack]PubLoadingWait",
+            "PullOk",
+            "PullCantReset",
+            "PullReset",
+            "PullDraw",
+            "PullWait"
+        ]
+    },
+    "PullOk": {
+        // 所有 OK 弹窗都点它：重置确认框的 OK、以及「已重置。」弹窗的 OK。
+        // 默认 target = 识别框中心，所以两个位置不同的 OK 都能正确点到。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^OK$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["PullEntry"]
+    },
+    "PullCantReset": {
+        // 「无法重置」（尚未获得扭蛋箱中全部报酬）：点掉这个提示，然后重试。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["无法重置", "尚未获得"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["PullEntry"]
+    },
+    "PullBoxEmpty": {
+        // 仅作 PullReset 的子识别：箱子已抽空。
+        //   剩余\s*[×xX＊*]?\s*0 -> 「剩余×0」（不会误匹配「剩余×10」）
+        //   0\s*/\s*0\s*次       -> 「0/0次」（不会误匹配「2734/2734次」）
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["剩余\\s*[×xX＊*]?\\s*0", "0\\s*/\\s*0\\s*次"] }
+        }
+    },
+    "PullResetBtn": {
+        // 仅作 PullReset 的子识别：「库存重置」按钮
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["库存重置"] }
+        }
+    },
+    "PullReset": {
+        // 箱子已空 且 「库存重置」在屏上 -> 点库存重置。
+        // box_index=1 让点击目标是「库存重置」按钮本身（不是「剩余×0」那行字）。
+        // 若此刻仍不可点，会弹「无法重置」，由 PullCantReset 收拾后重试。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["PullBoxEmpty", "PullResetBtn"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 2500,
+        "next": ["PullEntry"]
+    },
+    "PullDraw": {
+        // 点「抽取」= 一次抽完整个箱子，然后是很长的揭示动画。
+        // post_delay 给 20 秒；剩下的靠 PullReset 重试等过去。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^抽取$"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 20000,
+        "next": ["PullEntry"]
+    },
+    "PullWait": {
+        // 兜底等待（不设 max_hit）
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 1500,
+        "next": ["PullEntry"]
+    }
+}

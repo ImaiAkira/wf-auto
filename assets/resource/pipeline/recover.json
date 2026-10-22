@@ -1,0 +1,270 @@
+{
+    // ==========================================================================
+    // 唤醒/恢复游戏（RecoverEntry）—— 把卡死/掉线/跑到未知页面的游戏拉回「主城」
+    //
+    // 入口：RecoverEntry（本文件必须【自包含】：不复用其它文件的节点，
+    //       所有 next 一律指回 RecoverEntry）。
+    //
+    // 实测真源（唯一）：<local>\AppData\Local\Temp\opencode\recover_game.py
+    //   强杀 → monkey 重启(35s) → 账号确认页点「继续游戏」(20s)
+    //   → 标题页点「点击开始」(35s) → 底部导航「主城」→ 主城锚点 ≥2 校验。
+    //
+    // ★铁律★
+    //   1) 绝不使用 KeyEvent 4（返回键会把游戏退回标题页，已踩过两次）。
+    //   2) 主城锚点必须用【主城独有】的词，且【至少命中 2 个】才算在主城；
+    //      「领主战」单独不能算（详情页/列表页也有）。这里用「两两成对」的 And
+    //      组合来表达「≥2 命中」（pipeline 没有 at-least-N 组合器）。
+    //   3) 坐标一律 720 空间；OCR 点击默认点识别框中心（target=true）。
+    //
+    // 分派顺序（先命中先执行）：
+    //   主城(锚点≥2)→StopTask / 加载中→等待 / 账号确认页→继续游戏
+    //   / 标题页→点击开始 / 底部「主城」导航 / 其它识别不出的页面→重开游戏。
+    // ==========================================================================
+    "RecoverEntry": {
+        "next": [
+            // 公共换日弹窗（common.json）：最临时的全局打断，放最前。
+            // 必须排在 RecoverMainCity 之前：弹窗压在主城上时先点掉它，
+            // 否则会被判成主城直接 StopTask。
+            "[JumpBack]PubDailyPopup",
+            "RecoverMainCity",
+            // 公共加载等待（common.json）：纯等待不点击；沿用原 RecoverLoadingWait 的位置
+            // （主城锚点之后、账号/标题重进之前）。
+            "[JumpBack]PubLoadingWait",
+            "RecoverAccountConfirm",
+            "RecoverTitleStart",
+            "RecoverTapMainCityNav",
+            "RecoverRestartGame"
+        ]
+    },
+    // ---------------------------------------------------------------- 主城锚点
+    // 6 个主城独有锚点；两两成对表示「≥2 命中」。
+    "RecoverCityText1": {
+        "recognition": { "type": "OCR", "param": { "expected": ["修行之道"] } }
+    },
+    "RecoverCityText2": {
+        "recognition": { "type": "OCR", "param": { "expected": ["成长任务"] } }
+    },
+    "RecoverCityText3": {
+        "recognition": { "type": "OCR", "param": { "expected": ["当前进度"] } }
+    },
+    "RecoverCityText4": {
+        "recognition": { "type": "OCR", "param": { "expected": ["活动"] } }
+    },
+    "RecoverCityText5": {
+        "recognition": { "type": "OCR", "param": { "expected": ["关卡"] } }
+    },
+    "RecoverCityText6": {
+        "recognition": { "type": "OCR", "param": { "expected": ["领主战"] } }
+    },
+    // 「两两成对」= 同时命中两个主城独有词 ⇒ 命中数 ≥2。
+    "RecoverCityPair1": {
+        "recognition": { "type": "And", "param": { "all_of": ["RecoverCityText1", "RecoverCityText2"] } }
+    },
+    "RecoverCityPair2": {
+        "recognition": { "type": "And", "param": { "all_of": ["RecoverCityText1", "RecoverCityText3"] } }
+    },
+    "RecoverCityPair3": {
+        "recognition": { "type": "And", "param": { "all_of": ["RecoverCityText2", "RecoverCityText3"] } }
+    },
+    "RecoverCityPair4": {
+        "recognition": { "type": "And", "param": { "all_of": ["RecoverCityText3", "RecoverCityText4"] } }
+    },
+    "RecoverCityPair5": {
+        "recognition": { "type": "And", "param": { "all_of": ["RecoverCityText4", "RecoverCityText5"] } }
+    },
+    "RecoverCityPair6": {
+        "recognition": { "type": "And", "param": { "all_of": ["RecoverCityText5", "RecoverCityText6"] } }
+    },
+    "RecoverMainCity": {
+        // 主城独有锚点命中 ≥2 → 收工。
+        "recognition": {
+            "type": "Or",
+            "param": {
+                "any_of": [
+                    "RecoverCityPair1",
+                    "RecoverCityPair2",
+                    "RecoverCityPair3",
+                    "RecoverCityPair4",
+                    "RecoverCityPair5",
+                    "RecoverCityPair6"
+                ]
+            }
+        },
+        "action": { "type": "StopTask", "param": {} }
+    },
+
+    // ------------------------------------------------------- 账号确认页
+    "RecoverAccountConfirm": {
+        // 账号确认页：点「继续游戏」（点识别框中心）。
+        // ★必须两端锚定 ^继续游戏$★：实测页面上还有一句
+        //   「确认后回到标题页，再点「点击开始」进入」，若不锚定会命中文中的按钮名，
+        //   点到文字而不是按钮（已踩过）。页面的另一标识「登录成功，请确认本次使用的账号」
+        //   只用来【判页】，不参与点击。
+        // max_hit 限次：避免画面卡住时同一按钮被无限重复点击。
+        // ★判据已收敛到 common.PubLoginContinueText（薄包装）★
+        // 为什么不用 [JumpBack]PubLoginContinue：本节点原 next=["RecoverWaitLogin"]
+        //   （wait_seconds 链），不是回入口 → 不等价，保留薄包装只收敛判据。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubLoginContinueText"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "max_hit": 3,
+        "post_delay": 500,
+        "next": ["RecoverWaitLogin"]
+    },
+    "RecoverWaitLogin": {
+        // 「登录后等待」由设置里的选项覆盖（wait_seconds 的 seconds）。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "wait_seconds", "custom_action_param": { "seconds": 20 } }
+        },
+        "next": ["RecoverExpectAfterLogin", "RecoverAfterLoginRecheck"]
+    },
+    "RecoverExpectAfterLogin": {
+        // 点「继续游戏」后【期望出现】的下一个画面：标题页 / 加载中 / 主城 / 主城导航。
+        "recognition": {
+            "type": "Or",
+            "param": {
+                "any_of": [
+                    "RecoverMainCity",
+                    // 公共加载页判据（common.json 的 PubLoadingText，原 RecoverLoadingWait）。
+                    "PubLoadingText",
+                    "RecoverTitleStart",
+                    "RecoverTapMainCityNav"
+                ]
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["RecoverEntry"]
+    },
+    "RecoverAfterLoginRecheck": {
+        // 期望画面没出现时：每 5s 重查一次；一直没进展且画面连续无变化达到阈值
+        // → RecoverStallRestart 命中并重开；超过 max_hit 次仍无果 → RecoverRestartGame。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 5000,
+        "max_hit": 200,
+        "next": [
+            "RecoverExpectAfterLogin",
+            "RecoverStallRestart",
+            "RecoverAfterLoginRecheck",
+            "RecoverRestartGame"
+        ]
+    },
+
+    // --------------------------------------------------------- 标题页
+    "RecoverTitleStart": {
+        // 标题页：点「点击开始」（点识别框中心）。
+        // ★必须两端锚定 ^点击开始$★：账号页有一句「确认后回到标题页，再点「点击开始」进入」，
+        //   不锚定会点到那句话（已踩过）。
+        // max_hit 同账号页，防重复点击。
+        // ★判据已收敛到 common.PubTitleStartText（薄包装）★
+        // 为什么不用 [JumpBack]PubTitleStart：本节点原 next=["RecoverWaitStart"]
+        //   （wait_seconds 链），不是回入口 → 不等价，保留薄包装只收敛判据。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubTitleStartText"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "max_hit": 3,
+        "post_delay": 500,
+        "next": ["RecoverWaitStart"]
+    },
+    "RecoverWaitStart": {
+        // 「重开后等待」由设置里的选项覆盖（wait_seconds 的 seconds）。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Custom",
+            "param": { "custom_action": "wait_seconds", "custom_action_param": { "seconds": 35 } }
+        },
+        "next": ["RecoverExpectAfterStart", "RecoverAfterStartRecheck"]
+    },
+    "RecoverExpectAfterStart": {
+        // 点「点击开始」后【期望出现】的下一个画面：主城 / 加载中 / 主城导航。
+        // ★刻意【不含】标题页自己：否则点不动时会一直误判成「已推进」。
+        "recognition": {
+            "type": "Or",
+            "param": { "any_of": ["RecoverMainCity", "PubLoadingText", "RecoverTapMainCityNav"] }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["RecoverEntry"]
+    },
+    "RecoverAfterStartRecheck": {
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 5000,
+        "max_hit": 200,
+        "next": [
+            "RecoverExpectAfterStart",
+            "RecoverStallRestart",
+            "RecoverAfterStartRecheck",
+            "RecoverRestartGame"
+        ]
+    },
+
+    // ------------------------------------------------- 底部导航「主城」
+    "RecoverTapMainCityNav": {
+        // 底部导航「主城」（只认屏幕最底部一条 ROI，并两端锚定，避免误命中其它页面的「主城」字）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["^主城$"], "roi": [0, 1180, 720, 100] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 500,
+        "next": ["RecoverEntry"]
+    },
+
+    // --------------------------------------------- 卡死检测 + 重开游戏
+    "RecoverStallRestart": {
+        // 画面连续「无响应重开阈值」秒没有变化 → 判定卡死 → 重开游戏。
+        // 阈值由设置选项「无响应重开阈值」覆盖（custom_recognition_param.threshold_sec）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stall_recover",
+                "custom_recognition_param": { "threshold_sec": 180 }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "post_delay": 1000,
+        "next": ["RecoverEntry"]
+    },
+    "RecoverRestartGame": {
+        // 兜底：识别不出的页面 → 按实测流程强杀重开。
+        // pre_delay 给过场画面一点沉降时间，避免刚启动/正在切页时被误判成「未知页」。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "restart_game",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "pre_delay": 5000,
+        "max_hit": 5,
+        "post_delay": 1000,
+        "next": ["RecoverEntry"]
+    }
+}

@@ -1,0 +1,712 @@
+{
+    // ==========================================================================
+    // 自动刷幻想（幻想连战）—— 入口：PhantomEntry（★已并入「自动刷副本」SpecialEntry★）
+    //
+    // 【铁律 1：本文件必须自包含】不复用其它 pipeline 文件的节点；所有节点 next 一律
+    //   回统一分派器 SpecialEntry（除 StopTask 出口）。PhantomEntry 只是【别名入口】，
+    //   next -> SpecialEntry；真正的幻想状态机链在 special_dungeon.json 的 PhantomDispatch
+    //   （种类分派器）里，原 PhantomEntry.next 的 27 项原样搬过去。
+    //
+    // 【铁律 2：状态机】每个动作节点都由自定义识别 phantom_state 精确门控：
+    //   只有当前画面确实是该状态时节点才命中 → 天然做到「若状态=X，执行到下一个
+    //   状态的动作」。动作由自定义动作 phantom_act 执行：它【直接 OCR 目标按钮文字
+    //   本身】再点（绝不用识别框+死偏移猜按钮），点完重新截图校验画面是否推进。
+    //
+    // 【铁律 3：安全红线】
+    //   · 绝不 KeyEvent 4；返回一律用屏幕按钮。
+    //   · 绝不用「识别框 + 死偏移」猜按钮 → phantom_act 只点 OCR 到的按钮中心。
+    //   · 换日重进文案未实测到：PhantomRelogin 只做【整句】匹配（默认
+    //     「请重新启动游戏」，来自游戏包内置文案），识别不了就交给卡死兜底重开。
+    //
+    // 【铁律 4：出口】每个循环都有已验证出口：
+    //   PhantomDone（跑够目标套数）/ PhantomGiveUp（未知过多·超时·超量）/
+    //   PhantomStall（画面冻结 → 重开）。
+    //   一「套」= 15 关；目标套数由选项「刷几套」注入 target_sets（默认 1）。
+    //   打完一套 15 关 ≠ 收工；未达目标就回关卡选择页接着开下一套第 1 关。
+    //
+    // 状态名：phantom_main(关卡选择) / phantom_hub(活动入口) / phantom_solo_team(单人编队) /
+    //   phantom_level_required(需要130级限制弹窗) /
+    //   phantom_coop_room(共斗房间) / phantom_recruit_dialog(招募方式) / phantom_settle(结算) /
+    //   phantom_battle(战斗) / loading / main_city / activity / zhongshi / relogin / unknown
+    //
+    // 实测流程（16384）：
+    //   主城→活动→终始之战→(切 tab 找)幻想连战→活动入口点「战斗」→关卡选择页
+    //   关卡选择页点卡片「战斗」→ 单人编队(挑战) 或 共斗房间(招募→开始招募→挑战)
+    //   战斗 → 结算：优先点「继续挑战」直接连打；拿不到则「继续」/「OK」回关卡选择页。
+    //   结算多段动画由公共 [JumpBack]PubQuestResult 反复点顶部 QUESTRESULT 横幅快进
+    //   （原 PhantomQuestResult 已收敛到 common.json）。
+    // ==========================================================================
+    "PhantomEntry": {
+        // ★已并入「自动刷副本」（SpecialEntry）★
+        //   · PhantomEntry 变成【别名入口】：本身不做任何识别/导航，直接 next -> SpecialEntry；
+        //   · 所有 Phantom* 业务节点的 next 一律回指 SpecialEntry（★绝不回 PhantomEntry★），
+        //     否则会「跑飞」回旧分派器；统一回 SpecialEntry 才能让指挥官每轮重新评估
+        //     （切下一条目标 / 收工）。
+        //   · 幻想状态机链放在 special_dungeon.json 的 PhantomDispatch（种类分派器）里，
+        //     由 batch_mode 门控 kind=phantom 放行；原 PhantomEntry.next 的 27 项已原样搬过去。
+        //   · 单目标「自动刷幻想」（入口 PhantomEntry、清单为空）：种类由入口决定 = phantom
+        //     → PhantomDispatch 命中 → 跑回与合并前完全一致的幻想状态机（含 StopTask 收工）。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "next": ["SpecialEntry"]
+    },
+
+    // ------------------------------------------------- 原生点击辅助（被 run_action 调用）
+    "PhantomClick": {
+        // 只作为「原生 Click 动作」入口，由 agent 的 phantom_act / phantom_restart 通过
+        // context.run_action("PhantomClick", box=...) 调用来点击 OCR 到的按钮中心。
+        // ★为什么需要它★：部分 MaaFramework 原生库未导出 MaaControllerPostClickV2，
+        // AgentServer 进程里 Python 的 controller.post_click 会 ACCESS_VIOLATION；
+        // 走框架原生 Click 动作则版本无关。
+        // 不在 PhantomDispatch.next 里，正常分派不会执行到。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "Click", "param": { "target": true } }
+    },
+
+    // ------------------------------------------------------------------ 出口
+    "PhantomGiveUp": {
+        // 兜底收工：未知画面累计过多 / 长时间无新关卡 / 总时长超限 / 关卡记账异常。
+        // ★必须排在 PhantomDone 之后★（已修）：跑够目标套数的【正常收工】由 PhantomDone
+        //   负责；本节点只在「已完成但长时间回不到关卡选择页」等异常时兜底。
+        //   旧实现把它排在最前，且对 done 成立的 unknown 过渡帧立即收工 —— 真机实测
+        //   第 15 关结算后会先闪出 unknown 帧，GiveUp 抢先 StopTask，PhantomDone 永不命中
+        //   （2026-09-28 16384 复现）。现在它绝不对 done+未知/结算过渡帧抢先收工。
+        // target_sets = 用户指定的目标套数（一整套 = 15 关），由选项「刷几套」覆盖。
+        // coop_room_sec = 共斗房停留上限（#30）：幻想连战的协力关会进共斗房，招募不到
+        //   队友 / 挑战不可用时会有界收工（原因明确），绝不被公共打断 PubChallenge 盲点
+        //   那个灰掉的「挑战」而死循环（见 agent/side_impl 的 #30 说明）。
+        // ★#47★：停留时钟只在【真正离开房间】（开战/结算/回关卡页/主城…）时清零；
+        //   点「挑战」后的 loading 过渡帧【不再清零】→ coop_room_sec 一定能走到。
+        //   本节点（排在最前的出口）于是先于 PhantomStall（180s 强杀重启）命中，走
+        //   StopTask **优雅收工**，绝不重启游戏。归零规则见 agent/phantom_impl 的
+        //   _COOP_ROOM_STATES / _COOP_LEAVE_STATES。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_giveup",
+                "custom_recognition_param": {
+                    "ocr_entry": "OcrTask",
+                    "max_task_sec": 7200,
+                    "no_progress_sec": 900,
+                    "coop_room_sec": 120,
+                    "target_sets": 1
+                }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomDone": {
+        // 出口：账本已完成【目标套数】且回到【关卡选择页】→ 收工。
+        // ★未达目标套数时本节点不命中★ → 状态机继续在关卡选择页开下一套第 1 关
+        //   （用户在「刷几套」里填几套，就重复到第几套才收工）。
+        // ★同时承担「关卡上限」出口（选项「打到第几关以后放弃」= stage_cap）★：
+        //   本次任务实际打完第 N 关（N>=2 且进入安全画面：结算/关卡选择/编队/房间）时，
+        //   本节点也命中并优雅收工 —— 单一目标走 StopTask；批量模式（_phantom_override
+        //   把本节点动作改成 DoNothing）下由识别器 override_next 令 PhantomDispatch 走
+        //   SpecialBatchStop，回一次指挥官再停。上限与套数取【先到者】。
+        //   ★不是 giveup 兜底★：与"跑够套数"同一正常出口。详见 phantom_impl 2.6。
+        // ★必须排在 PhantomGiveUp 之前★：它是「跑够套数」的【正常收工】节点，
+        //   优先于兜底 GiveUp 命中（否则 GiveUp 会在过渡帧抢先收工，见其注释）。
+        // target_sets 由选项「刷几套」经 pipeline_override 注入；stage_cap 由选项
+        //   「打到第几关以后放弃」注入会话（不写在本节点参数里）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_done",
+                "custom_recognition_param": { "ocr_entry": "OcrTask", "target_sets": 1 }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomStall": {
+        // 卡死/换日：画面连续 N 秒无变化 → 强杀重开拉回主城（阈值由选项「无响应重开阈值」覆盖）。
+        // ★phantom_restart 走 MAA controller，设备无关，不写死 16448★。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "stall_recover",
+                "custom_recognition_param": { "threshold_sec": 180 }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_restart",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "max_hit": 8,
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomLevelRequired": {
+        // 【需要 130 级·硬出口】★真机实测 16448，2026-09-28★：
+        //   点「终结之战/终始之战」弹出
+        //   「玩家等级达到130后，解锁幻想连战与深渊连战。」+ 单个 OK（720(359,823)）。
+        //   RANK 不足的账号永远进不了幻想连战/深渊连战 → 干净收工，绝不点 OK、绝不空转。
+        // 判据：phantom_state 分类为 phantom_level_required（用两个高信息量整句片段，
+        //   见 agent/phantom_impl.py 的 LEVEL_GATE_HALVES；绝不关键词宽匹配）。
+        // 放在 PhantomEntry.next 很靠前（紧随公共换日弹窗）：该弹窗可能在
+        //   「活动页/终始之战/关卡选择页」等多处触发，
+        //   任何画面只要出现此弹窗都优先命中并 StopTask，不会掉进导航死循环。
+        // 不点击任何按钮：直接 StopTask（弹窗保持原样，交由用户/上层决定）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": {
+                    "state": "phantom_level_required",
+                    "ocr_entry": "OcrTask"
+                }
+            }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomLevelGateLine1": {
+        // 仅作 PhantomLevelRequiredNative 的子识别：报错文案前半句（整句片段，精确）。
+        // 允许 OCR 在数字两侧加空格（\s*），绝不放宽成「130」「等级」这类短词。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["玩家等级达到\\s*130\\s*后"] }
+        }
+    },
+    "PhantomLevelGateLine2": {
+        // 仅作 PhantomLevelRequiredNative 的子识别：报错文案后半句（整句片段，精确）。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["解锁幻想连战与深渊连战"] }
+        }
+    },
+    "PhantomLevelRequiredNative": {
+        // 【原生 OCR 兜底】同 PhantomLevelRequired，但用纯原生 OCR（And 两句），
+        // 不依赖 agent 自定义识别 —— 这样离线 verify_entry.py（未注册自定义识别时）
+        // 也能命中本节点，且生产环境下若 phantom_state 因文案切分未命中，这里仍能兜住。
+        // ★判据仍是两个高信息量整句片段（And 同时命中），不是单关键词宽匹配★。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PhantomLevelGateLine1", "PhantomLevelGateLine2"] }
+        },
+        "action": { "type": "StopTask", "param": {} },
+        "post_delay": 1000,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomLoginContinue": {
+        // 点掉「日期变了」后若被留在账号页 → 走重进链：点「继续游戏」（点 OCR 框中心）。
+        // phantom_state 分类不识别账号页，所以这里用原生 OCR 直接兜住。
+        // ★判据已收敛到 common.PubLoginContinueText（薄包装）★
+        // 为什么不用 [JumpBack]PubLoginContinue：调用点在 special_dungeon.json 的
+        //   PhantomDispatch.next，原 next=["SpecialEntry"]（要回指挥官 SpecialBatchPlan 再评估
+        //   批量目标）；[JumpBack] 只会回到 PhantomDispatch.next、跳过指挥官 → 不等价。
+        //   动作/next/延时原样。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubLoginContinueText"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "max_hit": 3,
+        "post_delay": 3000,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomTitleStart": {
+        // 重进链：标题页点「点击开始」（点 OCR 框中心）。之后回 SpecialEntry（分派器）从主城重新导航。
+        // ★判据已收敛到 common.PubTitleStartText（薄包装）★ 理由同上（不等价，保留薄包装）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PubTitleStartText"] }
+        },
+        "action": { "type": "Click", "param": {} },
+        "max_hit": 3,
+        "post_delay": 5000,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomRelogin": {
+        // 换日重进：识别到【整句】重进提示 → 强杀重开（同一条恢复链路），
+        // 重开后由分派器（PhantomDispatch）自己从主城重新导航回「幻想连战」继续。
+        // ⚠ 文案未真机实测；只做整句匹配，绝不宽匹配。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": {
+                    "state": "relogin",
+                    "ocr_entry": "OcrTask",
+                    "relogin_text": "请重新启动游戏"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_restart",
+                "custom_action_param": {
+                    "pkg": "com.leiting.wf",
+                    "restart_wait": 35,
+                    "login_wait": 20,
+                    "start_wait": 35,
+                    "force_stop_wait": 3,
+                    "nav_wait": 4
+                }
+            }
+        },
+        "max_hit": 8,
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+
+    // -------------------------------------------------------------- 等待
+    "PhantomLoading": {
+        // 加载/过场/健康忠告：只等待，绝不点击。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "loading", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 3000,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomBattleWait": {
+        // 战斗中：底部 HUD「时间 HH:MM」+「分数 NNN」→ 只等待。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "phantom_battle", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 4000,
+        "next": ["SpecialEntry"]
+    },
+
+    // ------------------------------------------------------- 关卡选择页
+    "PhantomMainFight": {
+        // 关卡选择页：点底部卡片上的「战斗」进入本关（单人编队或共斗房间）。
+        // 只点 OCR 到的「战斗」本身；点击后校验画面变成 编队/房间/加载。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "phantom_main", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^战斗$"],
+                    "prefer": "bottom",
+                    "expect": ["phantom_solo_team", "phantom_coop_room", "loading"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+
+    // --------------------------------------------------------- 单人编队页
+    "PhantomSoloChallenge": {
+        // 单人编队页：点「挑战」开打。ROI 限定底部，避开其它页面的「挑战」文字。
+        // ★#110★ 点击判据真源 = scene/challenge.py::CHALLENGE_CLICK_PATTERNS：整串锚定 +
+        //   至多一个箭头（真机帧 `挑战` / `挑战→` 两种渲染，8/17 帧带箭头）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "phantom_solo_team", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^挑战(→)?$"],
+                    "roi": [150, 980, 600, 1180],
+                    "expect": ["phantom_battle", "loading", "phantom_solo_team"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+
+    // --------------------------------------------------------- 共斗房间页
+    "PhantomCoopRecruit": {
+        // 共斗房间页·先招募：仅在「未进行招募」时命中（need_recruit），点「招募」。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": {
+                    "state": "phantom_coop_room",
+                    "need_recruit": true,
+                    "ocr_entry": "OcrTask"
+                }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^招募$"],
+                    "expect": ["phantom_recruit_dialog", "loading", "phantom_battle"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomRecruitStart": {
+        // 招募方式弹窗：点「开始招募」。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "phantom_recruit_dialog", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^开始招募$"],
+                    "expect": ["phantom_coop_room", "phantom_battle", "loading"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomCoopChallenge": {
+        // 共斗房间页·挑战：招募后（或 2 秒未自动开战）点「挑战」作为兜底。
+        // ★#30★：expect 里【不再】包含 phantom_coop_room —— 共斗房的「挑战」在没招募到
+        //   队友前是灰的（点了不推进），把「点完还停在房间」当失败显式打日志，便于真机诊断；
+        //   长时间开不了战由 PhantomGiveUp 的 coop_room_sec 有界收工（见 phantom_impl）。
+        // ★#110★ 点击判据真源 = scene/challenge.py::CHALLENGE_CLICK_PATTERNS（`挑战` / `挑战→`
+        //   两种渲染都认）。这颗房间里的「挑战」（720 中心 y≈929，框 [297,906,81,46]）正是
+        //   识别调研里带箭头样本的同高位置：旧形状 `^挑战$` 会在带箭头的那一半帧上点不中。
+        //   ★本节点【不设 roi】★：#30 用它兜底共斗房的挑战，靠 phantom_state=phantom_coop_room
+        //   门控页面，而不是靠 ROI。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "phantom_coop_room", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^挑战(→)?$"],
+                    "expect": ["phantom_battle", "loading"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+
+    // ----------------------------------------------------- 幻想连战活动入口
+    "PhantomHubEnter": {
+        // 活动入口（hub）：点「幻想连战」行上的「战斗」进入关卡选择页。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "phantom_hub", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^战斗$"],
+                    "roi": [0, 600, 720, 1050],
+                    "expect": ["phantom_main", "loading", "phantom_hub"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+
+    // ------------------------------------------------------------- 结算
+    // 优化 1：结算后优先「继续挑战」直接连打下一场（单人关），拿不到才退回关卡页。
+    // 优化 2：认出结算页就反复点顶部 QUESTRESULT 横幅，加速多段结算动画快进。
+    // 分派顺序（Entry.next）：ContinueChallenge → Fallback → [JumpBack]PubQuestResult，
+    //   保证「有按钮先点按钮、没有按钮才点横幅」，绝不互相卡死。
+    "PhantomSettleState": {
+        // 【结算页·状态门控】仅作结算系列节点的 And 子识别：确认当前是结算/奖励页。
+        // 不在 PhantomDispatch.next 里，不会独立执行。同时承担本关结算记账（phantom_state 内 _observe）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "phantom_settle", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "PhantomContinueChallengeText": {
+        // 仅作 PhantomSettleContinueChallenge 的子识别：结算页底部的「继续挑战」按钮。
+        "recognition": { "type": "OCR", "param": { "expected": ["^继续挑战$"] } }
+    },
+    "PhantomSettleContinueChallenge": {
+        // 【优化1·单人连刷】优先点「继续挑战」直接开下一场，不回关卡选择页。
+        // ★必须用 And(状态=结算, OCR=继续挑战) 双重门控★，不能把 继续挑战/继续/OK 塞进
+        //   同一个 phantom_act 的 what：phantom_act 的 _pick 是按【OCR 项顺序】取第一个
+        //   命中的，而结算页 OK 常排在 继续挑战 之前 → 旧单节点会误点 OK 回关卡页（实测）。
+        //   此处要求「画面确实是结算页」且「确实存在继续挑战」才命中，优先级确定。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PhantomSettleState", "PhantomContinueChallengeText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^继续挑战$"],
+                    "expect": [
+                        "phantom_battle",
+                        "phantom_solo_team",
+                        "phantom_coop_room",
+                        "loading",
+                        "phantom_settle",
+                        "phantom_main",
+                        "phantom_hub"
+                    ]
+                }
+            }
+        },
+        "post_delay": 1200,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomSettleFallback": {
+        // 拿不到「继续挑战」时的退回：点「继续」/「OK」→ 回关卡选择页
+        // （共斗关结束 / 第 15 关结束等，实测这些结算画面没有「继续挑战」）。
+        // 同样 And 门控：避免误点其它页面（「日期变了」「连续挑战次数」）的 OK/继续。
+        //
+        // ★判据已收敛到 common.PubResultContinueText（原 PhantomContinueText 已删）★
+        //   · 为什么不用 [JumpBack]PubResultContinue：本节点是 And(结算状态, 继续/OK)
+        //     双重门控 + 自定义动作 phantom_act（点按钮 + 重新截图校验推进），
+        //     与公共纯 Click 叶子不等价（直接换会丢门控，可能误点其它页的 OK）。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PhantomSettleState", "PubResultContinueText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^继续$", "^OK$"],
+                    "expect": [
+                        "phantom_settle",
+                        "phantom_battle",
+                        "phantom_main",
+                        "phantom_hub",
+                        "phantom_solo_team",
+                        "phantom_coop_room",
+                        "loading"
+                    ]
+                }
+            }
+        },
+        "post_delay": 1200,
+        "next": ["SpecialEntry"]
+    },
+
+    // --------------------------------------------------- 从主城导航（换日重开）
+    "PhantomNavActivity": {
+        // 主城 → 活动（只认精确「活动」，OCR 点文字本身）。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "main_city", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["^活动$"],
+                    "expect": ["activity", "loading"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomNavZhongshi": {
+        // 活动页 → 终始之战。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "activity", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "what": ["终始之战"],
+                    "expect": ["zhongshi", "loading"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomZhongshiGate": {
+        // 【终始之战列表页·门控】仅作 PhantomNavBanner 的 And 子识别：确认当前在终始之战列表页。
+        // 不在 PhantomDispatch.next 里，不会独立执行。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "zhongshi", "ocr_entry": "OcrTask" }
+            }
+        }
+    },
+    "PhantomBannerText": {
+        // 【幻想连战横幅文字】仅作 PhantomNavBanner 的 And 子识别：当前 tab 上确实有「幻想连战」卡片。
+        // ★关键修复★：旧版 PhantomNavBanner 只认「在终始之战列表页」，而它在分派链里排在
+        //   PhantomNavTab 前面；当默认 tab（未通关）显示的是别的活动（如深渊连战EX）时，
+        //   phantom_act step=banner 找不到横幅就原样返回、不点击，导致每轮都命中 Banner、
+        //   永远轮不到 Tab 切分类 → 死循环卡在终始之战页（2026-09-28 真机复现）。
+        //   现在要求「横幅文字确实存在」才命中 Banner；找不到就自然落到 PhantomNavTab 切 tab。
+        // OCR 实测样本（ph_ph_zs_tab3.png）：卡片标题「幻想连战」/ 英文「FANTASY ONSLAUGHT」。
+        "recognition": {
+            "type": "OCR",
+            "param": { "expected": ["幻.连战", "FANTASY"] }
+        }
+    },
+    "PhantomNavBanner": {
+        // 终始之战列表页：仅当当前 tab 能看到「幻想连战」横幅（幻X连战 / FANTASY ONSLAUGHT）时才点它。
+        // 看不到则本节点不命中，交由 PhantomNavTab 切分类 tab 继续找。
+        "recognition": {
+            "type": "And",
+            "param": { "all_of": ["PhantomZhongshiGate", "PhantomBannerText"] }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "step": "banner",
+                    "expect": ["phantom_hub", "loading", "zhongshi"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+    "PhantomNavTab": {
+        // 终始之战列表页：切分类 tab（未通关 → 已通关 → 完成）继续找「幻想连战」。
+        // 由 phantom_act 的 step=tab 维护循环索引，OCR 点 tab 文字本身。
+        "recognition": {
+            "type": "Custom",
+            "param": {
+                "custom_recognition": "phantom_state",
+                "custom_recognition_param": { "state": "zhongshi", "ocr_entry": "OcrTask" }
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "phantom_act",
+                "custom_action_param": {
+                    "step": "tab",
+                    "expect": ["zhongshi", "loading"]
+                }
+            }
+        },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+
+    // ------------------------------------------------------- 「是否继续」确认
+    "PhantomConfirmText": {
+        // 仅作 PhantomConfirmContinue 的子识别：确认框提示（待核实的整句）。
+        "recognition": { "type": "OCR", "param": { "expected": ["是否继续"] } }
+    },
+    "PhantomConfirmBtn": {
+        // 仅作 PhantomConfirmContinue 的子识别：确认框的「继续」按钮。
+        "recognition": { "type": "OCR", "param": { "expected": ["^继续$"] } }
+    },
+    "PhantomConfirmContinue": {
+        // 可能弹出的「是否继续」确认框：同时命中提示 + 继续按钮才点（box_index=1 点按钮本身）。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["PhantomConfirmText", "PhantomConfirmBtn"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1200,
+        "next": ["SpecialEntry"]
+    },
+
+    // -------------------------------------- 「连续挑战次数」确认框（E1 修复）
+    "PhantomCountConfirmText": {
+        // 仅作 PhantomCountConfirm 的子识别：编队页点「挑战」后弹出的
+        // 「连续挑战次数：N次」确认框提示文字（真机样本 ph_run_watch_0102.png）。
+        "recognition": { "type": "OCR", "param": { "expected": ["连续挑战次数"] } }
+    },
+    "PhantomCountConfirmOk": {
+        // 仅作 PhantomCountConfirm 的子识别：确认框的「OK」按钮。
+        "recognition": { "type": "OCR", "param": { "expected": ["^OK$"] } }
+    },
+    "PhantomCountConfirm": {
+        // 编队页「挑战」→ 弹出「连续挑战次数：N次」（取消/OK）确认框 → 点 OK 开打。
+        // ★只点 OCR 到的 OK 本身（box_index=1），绝不点「取消」★。
+        // 放在 PhantomSoloChallenge 之前：此时「挑战」被弹窗遮住，状态机判为 unknown，
+        // 旧实现会一路掉到 PhantomWait 卡 180s（E1 真机复现）；本节点兜住它。
+        "recognition": {
+            "type": "And",
+            "param": {
+                "all_of": ["PhantomCountConfirmText", "PhantomCountConfirmOk"],
+                "box_index": 1
+            }
+        },
+        "action": { "type": "Click", "param": {} },
+        "post_delay": 1500,
+        "next": ["SpecialEntry"]
+    },
+
+    // ------------------------------------------------------------- 兜底
+    "PhantomWait": {
+        // 认不出的画面：只等待，绝不盲目点击。
+        "recognition": { "type": "DirectHit", "param": {} },
+        "action": { "type": "DoNothing", "param": {} },
+        "post_delay": 2000,
+        "next": ["SpecialEntry"]
+    }
+}
